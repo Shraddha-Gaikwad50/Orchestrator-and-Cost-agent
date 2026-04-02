@@ -26,6 +26,8 @@ from pydantic import BaseModel, Field
 
 from telemetry import setup_observability
 
+from billing_llm_sql import question_needs_llm_sql, run_llm_billing_query, vertex_available
+
 # Optional: ADK agent shell for future tool wiring (no HTTP coupling)
 try:
     from google.adk.agents import Agent
@@ -136,6 +138,11 @@ def _parse_time_period(question: str, q_lower: str, today: date) -> tuple[date |
         notes.append(f"last calendar week ({start_last} to {end_last})")
         return start_last, end_last, notes
 
+    if re.search(r"\bthis\s+week\b", q_lower):
+        start_this_week = today - timedelta(days=today.weekday())
+        notes.append("this week (week-to-date)")
+        return start_this_week, today, notes
+
     date_match = re.search(r"\b(20\d{2}-\d{2}-\d{2})\b", question)
     if date_match:
         d = date.fromisoformat(date_match.group(1))
@@ -211,6 +218,36 @@ def parse_cost_query(question: str, *, today: date | None = None) -> CostQueryFi
         wants_total=wants_total,
         wants_top=wants_top,
         hint=hint,
+    )
+
+
+def compute_llm_date_window(f: CostQueryFilters, today: date) -> tuple[date, date, str]:
+    """Enforce max lookback for LLM-generated SQL (inclusive start/end)."""
+    max_days = int(os.environ.get("BILLING_LLM_MAX_LOOKBACK_DAYS", "30"))
+    allow_long = os.environ.get("BILLING_LLM_ALLOW_LONG_RANGE", "").lower() in ("1", "true", "yes")
+    notes: list[str] = []
+    if f.has_period and f.period_start is not None and f.period_end is not None:
+        start, end = f.period_start, f.period_end
+        span = (end - start).days + 1
+        if span > max_days:
+            if allow_long:
+                notes.append(
+                    f"Using your full requested window ({span} days) because BILLING_LLM_ALLOW_LONG_RANGE is enabled; "
+                    "dry-run still enforces the byte cap."
+                )
+            else:
+                start = end - timedelta(days=max_days - 1)
+                notes.append(
+                    f"Requested window exceeded {max_days} days; clamped to {start} through {end}. "
+                    "Narrow the range or set BILLING_LLM_ALLOW_LONG_RANGE=1."
+                )
+        return start, end, " ".join(notes) if notes else ""
+    end = today
+    start = today - timedelta(days=max_days - 1)
+    return (
+        start,
+        end,
+        f"No explicit period in your question — using the last {max_days} days through {end} (cost control).",
     )
 
 
@@ -335,17 +372,17 @@ def query_bigquery(question: str) -> str:
           ) AS raw_environment"""
 
     if f.wants_total:
-        sql = f"SELECT COALESCE(SUM(cost), 0) AS total_usd FROM `{table_ref}` {where_sql}"
+        sql = f"SELECT COALESCE(SUM(cost), 0) AS total_inr FROM `{table_ref}` {where_sql}"
     elif f.wants_top:
         sql = f"""
         SELECT
           service.description AS service_name,
           {label_sql},
-          SUM(cost) AS cost_usd
+          SUM(cost) AS cost_inr
         FROM `{table_ref}`
         {where_sql}
         GROUP BY 1, 2
-        ORDER BY cost_usd DESC
+        ORDER BY cost_inr DESC
         LIMIT 40
         """
     else:
@@ -354,7 +391,7 @@ def query_bigquery(question: str) -> str:
           DATE(usage_start_time) AS usage_date,
           service.description AS service_name,
           {label_sql},
-          SUM(cost) AS cost_usd
+          SUM(cost) AS cost_inr
         FROM `{table_ref}`
         {where_sql}
         GROUP BY 1, 2, 3
@@ -366,8 +403,8 @@ def query_bigquery(question: str) -> str:
         client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
     )
     if f.wants_total:
-        total = rows[0]["total_usd"] if rows else Decimal("0")
-        return json.dumps([{"total_usd": str(total)}], indent=2)
+        total = rows[0]["total_inr"] if rows else Decimal("0")
+        return json.dumps([{"total_inr": str(total), "currency": "INR"}], indent=2)
 
     period_label = (
         f"{f.period_start} to {f.period_end}" if f.has_period else ""
@@ -383,7 +420,8 @@ def query_bigquery(question: str) -> str:
                     "date": period_label or "aggregated",
                     "service_name": str(row["service_name"]),
                     "environment": row_env,
-                    "cost_usd": str(row["cost_usd"]),
+                    "cost_inr": str(row["cost_inr"]),
+                    "currency": "INR",
                 }
             )
         else:
@@ -393,7 +431,8 @@ def query_bigquery(question: str) -> str:
                     "date": usage_date.isoformat() if isinstance(usage_date, date) else str(usage_date),
                     "service_name": str(row["service_name"]),
                     "environment": row_env,
-                    "cost_usd": str(row["cost_usd"]),
+                    "cost_inr": str(row["cost_inr"]),
+                    "currency": "INR",
                 }
             )
     return json.dumps(out[:100], indent=2)
@@ -402,10 +441,36 @@ def query_bigquery(question: str) -> str:
 def query_cost_data(question: str) -> tuple[str, str]:
     """Run query against configured source, with fallback to Postgres in auto mode."""
     mode = SOURCE_MODE if SOURCE_MODE in {"auto", "bigquery", "postgres"} else "auto"
-    hint = parse_cost_query(question).hint
+    f = parse_cost_query(question)
+    hint = f.hint
+    table_project = BQ_BILLING_PROJECT or os.environ.get("GOOGLE_CLOUD_PROJECT", "")
+    llm_on = os.environ.get("BILLING_AGENT_LLM_SQL", "1").lower() not in ("0", "false", "no")
+
+    if (
+        mode in {"auto", "bigquery"}
+        and _bigquery_ready()
+        and table_project
+        and llm_on
+        and question_needs_llm_sql(question)
+    ):
+        table_ref = f"{table_project}.{BQ_BILLING_DATASET}.{BQ_BILLING_TABLE}"
+        ws, we, wnote = compute_llm_date_window(f, date.today())
+        try:
+            body, sh = run_llm_billing_query(
+                question,
+                table_ref,
+                table_project,
+                ws,
+                we,
+                wnote,
+            )
+            return body, f"{hint}; {sh}; currency=INR"
+        except Exception as e:
+            hint = f"{hint}; llm-sql failed ({e}); fallback=template"
+
     if mode in {"auto", "bigquery"} and _bigquery_ready():
         try:
-            return query_bigquery(question), f"{hint}; source=bigquery"
+            return query_bigquery(question), f"{hint}; source=bigquery; currency=INR"
         except Exception as e:
             if mode == "bigquery":
                 raise
@@ -418,7 +483,7 @@ def query_cost_data(question: str) -> tuple[str, str]:
 def agent_card() -> dict:
     return {
         "name": "Cost Metrics Agent",
-        "description": "Enterprise tasks: query infrastructure costs, analyze usage spikes, generate budget reports.",
+        "description": "GCP billing export analytics (INR): fast templates plus guarded Vertex SQL for SKU, project, credits, regions.",
         "url": BASE_URL,
         "version": "1.0.0",
         "capabilities": {"streaming": True, "pushNotifications": False},
@@ -460,7 +525,10 @@ def sse_pack(obj: dict) -> str:
 
 
 async def task_stream(message: str, task_id: str) -> AsyncIterator[str]:
-    progress_hint = parse_cost_query(message).hint
+    f = parse_cost_query(message)
+    progress_hint = f.hint
+    llm_on = os.environ.get("BILLING_AGENT_LLM_SQL", "1").lower() not in ("0", "false", "no")
+    use_llm = llm_on and question_needs_llm_sql(message)
     yield sse_pack(
         {
             "id": task_id,
@@ -475,6 +543,11 @@ async def task_stream(message: str, task_id: str) -> AsyncIterator[str]:
     )
     await asyncio.sleep(0.05)
 
+    run_msg = (
+        "Running guarded analytics (Vertex → BigQuery, dry-run byte cap)…"
+        if use_llm
+        else f"Running query ({progress_hint})…"
+    )
     yield sse_pack(
         {
             "id": task_id,
@@ -482,7 +555,7 @@ async def task_stream(message: str, task_id: str) -> AsyncIterator[str]:
                 "state": "working",
                 "message": {
                     "role": "agent",
-                    "parts": [{"text": f"Running query ({progress_hint})…"}],
+                    "parts": [{"text": run_msg}],
                 },
             },
         }
@@ -509,7 +582,7 @@ async def task_stream(message: str, task_id: str) -> AsyncIterator[str]:
 
     # Stream result in chunks (dummy chunking for SSE demo)
     chunk_size = 180
-    summary = f"Source: {source_hint}\n\nResult:\n{result_text}"
+    summary = f"Source: {source_hint}\n\nResult (amounts in INR ₹ where applicable):\n{result_text}"
     for i in range(0, len(summary), chunk_size):
         part = summary[i : i + chunk_size]
         yield sse_pack(
@@ -568,6 +641,10 @@ async def health():
         "source_mode": SOURCE_MODE,
         "bigquery_configured": _bigquery_ready(),
         "bigquery_table": table,
+        "billing_llm_sql_enabled": (
+            os.environ.get("BILLING_AGENT_LLM_SQL", "1").lower() not in ("0", "false", "no")
+        ),
+        "vertex_generative_available": vertex_available(),
     }
 
 

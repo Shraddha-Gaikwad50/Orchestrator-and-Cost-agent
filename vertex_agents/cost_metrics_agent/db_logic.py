@@ -305,17 +305,17 @@ def _query_bigquery(question: str) -> str:
       ) AS raw_environment"""
 
     if f.wants_total:
-        sql = f"SELECT COALESCE(SUM(cost), 0) AS total_usd FROM `{table_ref}` {where_sql}"
+        sql = f"SELECT COALESCE(SUM(cost), 0) AS total_inr FROM `{table_ref}` {where_sql}"
     elif f.wants_top:
         sql = f"""
         SELECT
           service.description AS service_name,
           {label_sql},
-          SUM(cost) AS cost_usd
+          SUM(cost) AS cost_inr
         FROM `{table_ref}`
         {where_sql}
         GROUP BY 1, 2
-        ORDER BY cost_usd DESC
+        ORDER BY cost_inr DESC
         LIMIT 40
         """
     else:
@@ -324,7 +324,7 @@ def _query_bigquery(question: str) -> str:
           DATE(usage_start_time) AS usage_date,
           service.description AS service_name,
           {label_sql},
-          SUM(cost) AS cost_usd
+          SUM(cost) AS cost_inr
         FROM `{table_ref}`
         {where_sql}
         GROUP BY 1, 2, 3
@@ -336,8 +336,8 @@ def _query_bigquery(question: str) -> str:
         client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).result()
     )
     if f.wants_total:
-        total = rows[0]["total_usd"] if rows else Decimal("0")
-        return json.dumps([{"total_usd": str(total)}], indent=2)
+        total = rows[0]["total_inr"] if rows else Decimal("0")
+        return json.dumps([{"total_inr": str(total), "currency": "INR"}], indent=2)
 
     period_label = f"{f.period_start} to {f.period_end}" if f.has_period else ""
     normalized: list[dict[str, str]] = []
@@ -351,7 +351,8 @@ def _query_bigquery(question: str) -> str:
                     "date": period_label or "aggregated",
                     "service_name": str(row["service_name"]),
                     "environment": row_env,
-                    "cost_usd": str(row["cost_usd"]),
+                    "cost_inr": str(row["cost_inr"]),
+                    "currency": "INR",
                 }
             )
         else:
@@ -362,7 +363,8 @@ def _query_bigquery(question: str) -> str:
                     "date": usage_date_val,
                     "service_name": str(row["service_name"]),
                     "environment": row_env,
-                    "cost_usd": str(row["cost_usd"]),
+                    "cost_inr": str(row["cost_inr"]),
+                    "currency": "INR",
                 }
             )
     return json.dumps(normalized[:100], indent=2)
