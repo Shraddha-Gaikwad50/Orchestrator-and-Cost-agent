@@ -8,6 +8,7 @@ import {
   type KeyboardEvent,
 } from "react";
 import { Bot, Loader2, Mic, Send, Sparkles, Square, User } from "lucide-react";
+import { CostResultView } from "@/components/cost-result-view";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
@@ -489,7 +490,11 @@ export function ChatPanel() {
                 </p>
               </div>
             )}
-            {messages.map((m) => (
+            {messages.map((m) => {
+              const lastId = messages[messages.length - 1]?.id;
+              const deferStructured =
+                m.role === "assistant" && loading && m.id === lastId;
+              return (
               <div
                 key={m.id}
                 className={cn(
@@ -519,20 +524,27 @@ export function ChatPanel() {
                       : "border border-border/70 bg-card text-foreground shadow-sm"
                   )}
                 >
-                  <p className="whitespace-pre-wrap break-words">
-                    {m.content ||
-                      (m.role === "assistant" && loading ? "" : m.content)}
-                  </p>
-                  {m.role === "assistant" && loading && !m.content && (
-                    <span className="inline-flex gap-1 pt-0.5">
-                      <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-muted-foreground/70 [animation-delay:-0.3s]" />
-                      <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-muted-foreground/70 [animation-delay:-0.15s]" />
-                      <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-muted-foreground/70" />
-                    </span>
+                  {m.role === "assistant" ? (
+                    <>
+                      <CostResultView
+                        content={m.content}
+                        deferStructured={deferStructured}
+                      />
+                      {loading && !m.content && (
+                        <span className="inline-flex gap-1 pt-0.5">
+                          <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-muted-foreground/70 [animation-delay:-0.3s]" />
+                          <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-muted-foreground/70 [animation-delay:-0.15s]" />
+                          <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-muted-foreground/70" />
+                        </span>
+                      )}
+                    </>
+                  ) : (
+                    <p className="whitespace-pre-wrap break-words">{m.content}</p>
                   )}
                 </div>
               </div>
-            ))}
+            );
+            })}
             <div ref={bottomRef} />
           </div>
         </ScrollArea>
