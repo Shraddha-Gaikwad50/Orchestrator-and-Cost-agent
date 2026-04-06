@@ -1,11 +1,11 @@
-import { ChatPanel } from "@/components/chat-panel";
+import { ChatWorkspace } from "@/components/chat-workspace";
 
 export default function Home() {
   return (
     <main className="relative min-h-screen overflow-hidden bg-background">
       <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_90%_60%_at_50%_-25%,hsl(var(--primary)/0.18),transparent)]" aria-hidden />
       <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_60%_40%_at_100%_50%,hsl(173_40%_50%/0.06),transparent)]" aria-hidden />
-      <div className="relative mx-auto flex min-h-screen max-w-3xl flex-col gap-8 px-4 py-10 md:max-w-4xl md:px-8 md:py-14">
+      <div className="relative mx-auto flex min-h-screen max-w-7xl flex-col gap-8 px-4 py-10 md:px-8 md:py-14">
         <header className="space-y-4 text-center md:text-left">
           <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-primary/80">
             Local · Hybrid agent mesh
@@ -20,7 +20,7 @@ export default function Home() {
           </p>
         </header>
 
-        <ChatPanel />
+        <ChatWorkspace />
 
         <footer className="pb-6 text-center text-xs leading-relaxed text-muted-foreground md:text-left">
           Ensure the orchestrator and cost agent are running (e.g.{" "}

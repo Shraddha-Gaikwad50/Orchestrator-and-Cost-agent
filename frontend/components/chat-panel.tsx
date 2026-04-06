@@ -5,7 +5,9 @@ import {
   useEffect,
   useRef,
   useState,
+  type Dispatch,
   type KeyboardEvent,
+  type SetStateAction,
 } from "react";
 import { Bot, Loader2, Mic, Send, Sparkles, Square, User } from "lucide-react";
 import { CostResultView } from "@/components/cost-result-view";
@@ -46,7 +48,6 @@ function healthCheckUrl(): string {
 const HEALTH_FETCH_MS = 10_000;
 const CHAT_STREAM_MAX_MS = 180_000;
 
-const SESSION_STORAGE_KEY = "pa-orchestrator-session";
 /** Optional JWT for /chat/stream when orchestrator auth is enabled (set after login). */
 const ACCESS_TOKEN_STORAGE_KEY = "pa-orchestrator-access-token";
 
@@ -122,11 +123,25 @@ function parseSseBlocks(buffer: string): { events: string[]; rest: string } {
 
 type HealthState = "checking" | "ok" | "error";
 
-export function ChatPanel() {
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+export type ChatPanelProps = {
+  sessionId: string | null;
+  onSessionResolved: (id: string) => void;
+  messages: ChatMessage[];
+  setMessages: Dispatch<SetStateAction<ChatMessage[]>>;
+  onStreamBusyChange?: (busy: boolean) => void;
+  onTurnComplete?: () => void;
+};
+
+export function ChatPanel({
+  sessionId,
+  onSessionResolved,
+  messages,
+  setMessages,
+  onStreamBusyChange,
+  onTurnComplete,
+}: ChatPanelProps) {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
-  const [sessionId, setSessionId] = useState<string | null>(null);
   const [health, setHealth] = useState<HealthState>("checking");
   const [isRecording, setIsRecording] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
@@ -138,15 +153,6 @@ export function ChatPanel() {
   const recordChunksRef = useRef<BlobPart[]>([]);
   const recordMimeRef = useRef<string>("audio/webm");
   const recordLimitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  useEffect(() => {
-    try {
-      const existing = sessionStorage.getItem(SESSION_STORAGE_KEY);
-      if (existing) setSessionId(existing);
-    } catch {
-      /* ignore */
-    }
-  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -342,6 +348,7 @@ export function ChatPanel() {
     ]);
     setInput("");
     setLoading(true);
+    onStreamBusyChange?.(true);
     requestAnimationFrame(() => textareaRef.current?.focus());
 
     const streamAc = new AbortController();
@@ -364,12 +371,7 @@ export function ChatPanel() {
 
       const sid = res.headers.get("X-Session-Id");
       if (sid) {
-        setSessionId(sid);
-        try {
-          sessionStorage.setItem(SESSION_STORAGE_KEY, sid);
-        } catch {
-          /* ignore */
-        }
+        onSessionResolved(sid);
       }
 
       if (!res.ok || !res.body) {
@@ -453,6 +455,8 @@ export function ChatPanel() {
     } finally {
       clearTimeout(streamLimit);
       setLoading(false);
+      onStreamBusyChange?.(false);
+      onTurnComplete?.();
       scrollToBottom();
     }
   };
