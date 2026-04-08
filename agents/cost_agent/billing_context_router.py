@@ -41,6 +41,10 @@ class BillingRoutePayload(BaseModel):
     billing_region: str | None = None
     wants_total: bool = False
     wants_top: bool = False
+    time_scope: str | None = Field(
+        default=None,
+        description="explicit_window|month_to_date|full_history_to_date|unsure",
+    )
 
 
 @dataclass(frozen=True)
@@ -71,6 +75,7 @@ ROUTER_SCHEMA: dict[str, Any] = {
         "billing_region": {"type": "string"},
         "wants_total": {"type": "boolean"},
         "wants_top": {"type": "boolean"},
+        "time_scope": {"type": "string"},
     },
     "required": ["rewritten_question", "hint", "time_confident", "wants_total", "wants_top"],
 }
@@ -116,9 +121,42 @@ def _router_prompt(message: str, today: date) -> str:
         "set window_start to first day of the first named month and window_end=today.\n"
         "- For a named full month like 'March 2026', return full calendar bounds (e.g. 2026-03-01..2026-03-31).\n"
         "- For 'last N days' => inclusive range ending today.\n"
-        "- If user is vague (e.g. only 'till now' with no anchor), set time_confident=false and omit window fields.\n\n"
+        "- For 'used till now' / 'until now' with no explicit month anchor, prefer full_history_to_date.\n"
+        "- Set time_scope to one of: explicit_window, month_to_date, full_history_to_date, unsure.\n"
+        "- If user is vague and cannot be resolved, set time_scope=unsure, time_confident=false and omit window fields.\n\n"
         f"Conversation:\n{message}"
     )
+
+
+def _default_till_now_scope() -> str:
+    v = os.environ.get("BILLING_DEFAULT_TILL_NOW_SCOPE", "full_history").strip().lower()
+    if v in {"month_to_date", "mtd"}:
+        return "month_to_date"
+    return "full_history_to_date"
+
+
+def _full_history_start(today: date) -> date:
+    raw = os.environ.get("BILLING_FULL_HISTORY_START_DATE", "").strip()
+    if raw:
+        try:
+            return date.fromisoformat(raw)
+        except ValueError:
+            pass
+    # Safe default: start of current year (still bounded by dry-run bytes cap).
+    return date(today.year, 1, 1)
+
+
+def _looks_discovery_query(text: str) -> bool:
+    t = text.lower()
+    return (
+        ("unique" in t or "distinct" in t or "list" in t)
+        and ("service" in t or "services" in t)
+    )
+
+
+def _mentions_till_now(text: str) -> bool:
+    t = text.lower()
+    return any(p in t for p in ("till now", "until now", "to date", "so far"))
 
 
 def _parse_json(raw: str) -> BillingRoutePayload:
@@ -194,15 +232,31 @@ def _invoke_router(prompt: str) -> BillingRoutePayload:
 
 def resolve_cost_context(message: str, *, today: date) -> ResolvedCostContext:
     payload = _invoke_router(_router_prompt(message, today))
-    # If unsure, force month-to-date default policy.
-    if not payload.time_confident or not payload.window_start or not payload.window_end:
-        ws = date(today.year, today.month, 1)
-        we = today
-        hint = (payload.hint.strip() or "no explicit filters") + "; defaulted to this month (month-to-date)"
-    else:
+    scope = (payload.time_scope or "").strip().lower()
+    raw_hint = payload.hint.strip() or "no explicit filters"
+    text = payload.rewritten_question or message
+    if payload.window_start and payload.window_end:
         ws = date.fromisoformat(payload.window_start)
         we = date.fromisoformat(payload.window_end)
-        hint = payload.hint.strip() or "no explicit filters"
+        hint = raw_hint
+    elif scope in {"month_to_date", "mtd"} or "this month" in text.lower():
+        ws = date(today.year, today.month, 1)
+        we = today
+        hint = raw_hint + "; defaulted to this month (month-to-date)"
+    elif scope == "full_history_to_date" or _mentions_till_now(text) or _looks_discovery_query(text):
+        ws = _full_history_start(today)
+        we = today
+        hint = raw_hint + f"; defaulted to full history-to-date ({ws} to {we})"
+    else:
+        # Ambiguous fallback policy is configurable; default is full-history-to-date.
+        if _default_till_now_scope() == "month_to_date":
+            ws = date(today.year, today.month, 1)
+            we = today
+            hint = raw_hint + "; defaulted to this month (month-to-date)"
+        else:
+            ws = _full_history_start(today)
+            we = today
+            hint = raw_hint + f"; defaulted to full history-to-date ({ws} to {we})"
     env = payload.env.strip().lower() if payload.env else None
     if env not in {"prod", "dev"}:
         env = None

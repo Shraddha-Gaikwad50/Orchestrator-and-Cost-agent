@@ -464,12 +464,35 @@ def _preflight_window_with_dry_run(
     return est <= max_bytes, est
 
 
+def _mentions_till_now_phrase(text: str) -> bool:
+    t = (text or "").lower()
+    return any(p in t for p in ("till now", "until now", "till date", "to date", "so far"))
+
+
+def _default_till_now_scope() -> str:
+    v = os.environ.get("BILLING_DEFAULT_TILL_NOW_SCOPE", "full_history").strip().lower()
+    if v in {"month_to_date", "mtd"}:
+        return "month_to_date"
+    return "full_history_to_date"
+
+
+def _full_history_start(today: date) -> date:
+    raw = os.environ.get("BILLING_FULL_HISTORY_START_DATE", "").strip()
+    if raw:
+        try:
+            return date.fromisoformat(raw)
+        except ValueError:
+            pass
+    return date(today.year, 1, 1)
+
+
 def compute_llm_date_window(
     f: CostQueryFilters,
     today: date,
     *,
     preflight_job_project: str | None = None,
     preflight_table_ref: str | None = None,
+    original_question: str = "",
 ) -> tuple[date, date, str]:
     """Enforce max lookback for LLM-generated SQL (inclusive start/end)."""
     max_days = int(os.environ.get("BILLING_LLM_MAX_LOOKBACK_DAYS", "30"))
@@ -492,6 +515,13 @@ def compute_llm_date_window(
                 f.period_start,
                 f.period_end,
                 "No lookback day cap configured; using your requested window. Dry-run still enforces the byte cap.",
+            )
+        if _mentions_till_now_phrase(original_question) and _default_till_now_scope() == "full_history_to_date":
+            start = _full_history_start(today)
+            return (
+                start,
+                today,
+                f"No explicit period in your question — defaulting to full history-to-date ({start} to {today}).",
             )
         start = date(today.year, today.month, 1)
         return (
@@ -547,6 +577,13 @@ def compute_llm_date_window(
                 )
         return start, end, " ".join(notes) if notes else ""
     end = today
+    if _mentions_till_now_phrase(original_question) and _default_till_now_scope() == "full_history_to_date":
+        start = _full_history_start(today)
+        return (
+            start,
+            end,
+            f"No explicit period in your question — defaulting to full history-to-date ({start} to {end}).",
+        )
     start = today - timedelta(days=max_days - 1)
     return (
         start,
@@ -761,6 +798,7 @@ def query_cost_data(question: str) -> tuple[str, str]:
     f = parse_cost_query(question)
     hint = f.hint
     rewritten_question = question
+    router_status = "router_skipped"
     table_project = BQ_BILLING_PROJECT or os.environ.get("GOOGLE_CLOUD_PROJECT", "")
     llm_on = os.environ.get("BILLING_AGENT_LLM_SQL", "1").lower() not in ("0", "false", "no")
     table_ref = (
@@ -797,15 +835,19 @@ def query_cost_data(question: str) -> tuple[str, str]:
                         )
                         rewritten_question = routed.rewritten_question or question
                         hint = f.hint
-                    except Exception:
-                        pass
+                        router_status = "router_ok"
+                    except Exception as e:
+                        router_status = f"router_fallback({type(e).__name__})"
             ws, we, wnote = compute_llm_date_window(
                 f,
                 date.today(),
                 preflight_job_project=table_project,
                 preflight_table_ref=table_ref,
+                original_question=question,
             )
             extra = hint if hint and hint != "no explicit filters" else ""
+            if router_status != "router_ok":
+                extra = f"{extra}; {router_status}".strip("; ").strip()
             wnote_full = f"{wnote} Parser hints: {extra}".strip() if extra else wnote
             try:
                 body, sh = run_llm_billing_query(
