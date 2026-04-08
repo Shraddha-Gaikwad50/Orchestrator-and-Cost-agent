@@ -442,7 +442,18 @@ def compute_llm_date_window(f: CostQueryFilters, today: date) -> tuple[date, dat
     """Enforce max lookback for LLM-generated SQL (inclusive start/end)."""
     max_days = int(os.environ.get("BILLING_LLM_MAX_LOOKBACK_DAYS", "30"))
     allow_long = os.environ.get("BILLING_LLM_ALLOW_LONG_RANGE", "").lower() in ("1", "true", "yes")
+    allow_explicit_calendar = os.environ.get(
+        "BILLING_LLM_ALLOW_EXPLICIT_CALENDAR_WINDOW",
+        "1",
+    ).lower() in ("1", "true", "yes")
     notes: list[str] = []
+
+    def is_full_calendar_month(start: date, end: date) -> bool:
+        if start.year != end.year or start.month != end.month:
+            return False
+        last = calendar.monthrange(start.year, start.month)[1]
+        return start.day == 1 and end.day == last
+
     if f.has_period and f.period_start is not None and f.period_end is not None:
         start, end = f.period_start, f.period_end
         span = (end - start).days + 1
@@ -450,6 +461,11 @@ def compute_llm_date_window(f: CostQueryFilters, today: date) -> tuple[date, dat
             if allow_long:
                 notes.append(
                     f"Using your full requested window ({span} days) because BILLING_LLM_ALLOW_LONG_RANGE is enabled; "
+                    "dry-run still enforces the byte cap."
+                )
+            elif allow_explicit_calendar and is_full_calendar_month(start, end):
+                notes.append(
+                    f"Using full calendar-month window {start} through {end} ({span} days); "
                     "dry-run still enforces the byte cap."
                 )
             else:
