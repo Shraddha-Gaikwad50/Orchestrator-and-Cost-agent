@@ -37,6 +37,85 @@ export type ParsedCostMessage =
     }
   | { kind: "plain"; text: string };
 
+function parseRankedCostList(raw: string): ParsedCostMessage | null {
+  const lines = raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const rows: Record<string, string>[] = [];
+  for (const line of lines) {
+    if (!/^\d+\.\s+/.test(line)) continue;
+    const body = line.replace(/^\d+\.\s+/, "").trim();
+    const amountMatch =
+      body.match(/(?:INR|₹)\s*([-+]?[\d,]+(?:\.\d+)?(?:e[-+]?\d+)?)/i) ||
+      body.match(/([-+]?[\d,]+(?:\.\d+)?(?:e[-+]?\d+)?)\s*(?:INR|₹)\s*$/i);
+    if (!amountMatch) continue;
+    const amount = amountMatch[1]?.replace(/,/g, "").trim();
+    if (!amount) continue;
+    const idx = body.toLowerCase().indexOf(amountMatch[0].toLowerCase());
+    let service = idx > -1 ? body.slice(0, idx).trim() : body.trim();
+    service = service
+      .replace(/[:\-–]\s*$/g, "")
+      .replace(/^\*+/, "")
+      .replace(/\*+$/g, "")
+      .trim();
+    if (!service) continue;
+    rows.push({
+      service_name: service,
+      cost_inr: amount,
+    });
+  }
+  if (!rows.length) return null;
+  const preamble = raw.split(/\r?\n\r?\n/)[0]?.trim() ?? "";
+  return {
+    kind: "table",
+    preamble,
+    noteBeforeJson: "",
+    columns: ["service_name", "cost_inr"],
+    rows,
+    footer: "",
+  };
+}
+
+function parseBulletServiceList(raw: string): ParsedCostMessage | null {
+  const lines = raw.split(/\r?\n/);
+  const rows: Record<string, string>[] = [];
+  for (const line of lines) {
+    const m = line.match(/^\s*[*-]\s+(.+?)\s*$/);
+    if (!m) continue;
+    rows.push({ service_name: m[1].trim() });
+  }
+  if (!rows.length) return null;
+  const preamble = raw.split(/\r?\n\r?\n/)[0]?.trim() ?? "";
+  return {
+    kind: "table",
+    preamble,
+    noteBeforeJson: "",
+    columns: ["service_name"],
+    rows,
+    footer: "",
+  };
+}
+
+function parseInlineServiceSentence(raw: string): ParsedCostMessage | null {
+  const compact = raw.replace(/\s+/g, " ").trim();
+  if (!/services?/i.test(compact) || !compact.includes(",")) return null;
+  const colonIdx = compact.indexOf(":");
+  if (colonIdx < 0 || colonIdx === compact.length - 1) return null;
+  const listPart = compact.slice(colonIdx + 1).trim().replace(/\.$/, "");
+  const normalized = listPart.replace(/\s+and\s+/gi, ", ");
+  const items = normalized
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean);
+  if (items.length < 3) return null;
+  return {
+    kind: "table",
+    preamble: compact.slice(0, colonIdx + 1).trim(),
+    noteBeforeJson: "",
+    columns: ["service_name"],
+    rows: items.map((service_name) => ({ service_name })),
+    footer: "",
+  };
+}
+
 function deriveColumnOrder(keys: string[]): string[] {
   const set = new Set(keys);
   const ordered: string[] = [];
@@ -125,6 +204,12 @@ function extractFirstJson(s: string): {
 export function parseCostAssistantMessage(raw: string): ParsedCostMessage {
   const idx = raw.indexOf(RESULT_MARKER);
   if (idx === -1) {
+    const ranked = parseRankedCostList(raw);
+    if (ranked) return ranked;
+    const services = parseBulletServiceList(raw);
+    if (services) return services;
+    const inlineServices = parseInlineServiceSentence(raw);
+    if (inlineServices) return inlineServices;
     return { kind: "plain", text: raw };
   }
 

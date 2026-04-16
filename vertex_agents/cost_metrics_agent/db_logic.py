@@ -23,6 +23,7 @@ DATABASE_URL = os.environ.get(
     "postgresql://postgres:postgres@127.0.0.1:5435/postgres",
 )
 SOURCE_MODE = os.environ.get("COST_DATA_SOURCE", "auto").strip().lower()
+BILLING_BQ_SCHEMA_MODE = os.environ.get("BILLING_BQ_SCHEMA_MODE", "raw_export").strip().lower()
 
 # BigQuery Billing Export source (optional)
 BQ_BILLING_PROJECT = os.environ.get("BQ_BILLING_PROJECT", "").strip()
@@ -81,6 +82,26 @@ def _dev_mention_is_project_slug(q: str) -> bool:
 
 def _normalize_project_id_slug(raw: str) -> str:
     return re.sub(r"\s+", "", raw.strip().lower())
+
+
+def _schema_mode() -> str:
+    return "clean_view" if BILLING_BQ_SCHEMA_MODE in {"clean", "clean_view"} else "raw_export"
+
+
+def _service_col() -> str:
+    return "service_name" if _schema_mode() == "clean_view" else "service.description"
+
+
+def _project_id_col() -> str:
+    return "project_id" if _schema_mode() == "clean_view" else "project.id"
+
+
+def _region_col() -> str:
+    return "region" if _schema_mode() == "clean_view" else "location.region"
+
+
+def _project_labels_col() -> str:
+    return "project_labels" if _schema_mode() == "clean_view" else "project.labels"
 
 
 def _extract_gcp_project_id(question: str) -> str | None:
@@ -235,6 +256,27 @@ def _extract_billing_region(question: str) -> str | None:
     return None
 
 
+def _mentions_till_now(q: str) -> bool:
+    t = " ".join(q.lower().split())
+    return bool(
+        ("till now" in t)
+        or ("until now" in t)
+        or ("till date" in t)
+        or ("to date" in t)
+        or ("so far" in t)
+    )
+
+
+def _full_history_start(today: date) -> date:
+    raw = os.environ.get("BILLING_FULL_HISTORY_START_DATE", "").strip()
+    if raw:
+        try:
+            return date.fromisoformat(raw)
+        except ValueError:
+            pass
+    return date(today.year, 1, 1)
+
+
 @dataclass(frozen=True)
 class CostQueryFilters:
     env: str | None
@@ -281,6 +323,16 @@ def parse_cost_query(question: str, *, today: date | None = None) -> CostQueryFi
 
     ps, pe, pnotes = _parse_time_period(question, q, ref)
     notes.extend(pnotes)
+    if ps is None and pe is None and _mentions_till_now(question):
+        scope = os.environ.get("BILLING_DEFAULT_TILL_NOW_SCOPE", "full_history").strip().lower()
+        if scope in {"month_to_date", "mtd"}:
+            ps = date(ref.year, ref.month, 1)
+            pe = ref
+            notes.append("defaulted to this month (month-to-date)")
+        else:
+            ps = _full_history_start(ref)
+            pe = ref
+            notes.append(f"defaulted to full history-to-date ({ps} to {pe})")
 
     br = _extract_billing_region(question)
     if br:
@@ -389,23 +441,24 @@ def _normalize_env(raw: str | None) -> str:
 
 
 def _bq_env_sql_fragment(env: str | None) -> str:
+    labels = _project_labels_col()
     if not env:
         return ""
     if env == "prod":
         return """ AND (
           NOT EXISTS (
-            SELECT 1 FROM UNNEST(IFNULL(project.labels, [])) AS l
+            SELECT 1 FROM UNNEST(IFNULL(""" + labels + """, [])) AS l
             WHERE LOWER(l.key) IN ('environment', 'env')
           )
           OR EXISTS (
-            SELECT 1 FROM UNNEST(IFNULL(project.labels, [])) AS l
+            SELECT 1 FROM UNNEST(IFNULL(""" + labels + """, [])) AS l
             WHERE LOWER(l.key) IN ('environment', 'env')
               AND LOWER(l.value) IN ('prod', 'production', 'prd')
           )
         )"""
     if env == "dev":
         return """ AND EXISTS (
-          SELECT 1 FROM UNNEST(IFNULL(project.labels, [])) AS l
+          SELECT 1 FROM UNNEST(IFNULL(""" + labels + """, [])) AS l
           WHERE LOWER(l.key) IN ('environment', 'env')
             AND LOWER(l.value) IN ('dev', 'development')
         )"""
@@ -418,23 +471,27 @@ def _query_bigquery(question: str) -> str:
     if not table_project:
         raise RuntimeError("Set BQ_BILLING_PROJECT or GOOGLE_CLOUD_PROJECT for BigQuery source.")
     table_ref = f"{table_project}.{BQ_BILLING_DATASET}.{BQ_BILLING_TABLE}"
+    svc_col = _service_col()
+    proj_col = _project_id_col()
+    reg_col = _region_col()
+    labels_col = _project_labels_col()
 
     filters: list[str] = []
     params: list[bigquery.ScalarQueryParameter] = []
     if f.svc:
         filters.append(
-            "STRPOS(LOWER(IFNULL(service.description, '')), LOWER(@service_needle)) > 0"
+            f"STRPOS(LOWER(IFNULL({svc_col}, '')), LOWER(@service_needle)) > 0"
         )
         params.append(bigquery.ScalarQueryParameter("service_needle", "STRING", f.svc))
     if f.billing_region:
         filters.append(
-            "LOWER(TRIM(COALESCE(location.region, ''))) = LOWER(@billing_region)"
+            f"LOWER(TRIM(COALESCE({reg_col}, ''))) = LOWER(@billing_region)"
         )
         params.append(
             bigquery.ScalarQueryParameter("billing_region", "STRING", f.billing_region)
         )
     if f.billing_project_id:
-        filters.append("project.id = @billing_project_id")
+        filters.append(f"{proj_col} = @billing_project_id")
         params.append(
             bigquery.ScalarQueryParameter("billing_project_id", "STRING", f.billing_project_id)
         )
@@ -450,7 +507,7 @@ def _query_bigquery(question: str) -> str:
     label_sql = """COALESCE(
         (
           SELECT ANY_VALUE(l.value)
-          FROM UNNEST(IFNULL(project.labels, [])) AS l
+          FROM UNNEST(IFNULL(""" + labels_col + """, [])) AS l
           WHERE LOWER(l.key) IN ('environment', 'env')
         ),
         'prod'
@@ -461,7 +518,7 @@ def _query_bigquery(question: str) -> str:
     elif f.wants_top:
         sql = f"""
         SELECT
-          service.description AS service_name,
+          {svc_col} AS service_name,
           {label_sql},
           SUM(cost) AS cost_inr
         FROM `{table_ref}`
@@ -474,7 +531,7 @@ def _query_bigquery(question: str) -> str:
         sql = f"""
         SELECT
           DATE(usage_start_time) AS usage_date,
-          service.description AS service_name,
+          {svc_col} AS service_name,
           {label_sql},
           SUM(cost) AS cost_inr
         FROM `{table_ref}`

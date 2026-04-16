@@ -7,12 +7,10 @@
   orchestrator  -> vertex_agents/pa_orchestrator_agent
 
 .PARAMETER DatabaseUrl
-  For cost deploy: Postgres DSN baked into Agent Engine env. Vertex cannot reach your laptop's
-  127.0.0.1 - use a TCP tunnel (ngrok/cloudflared) host:port per docs/PHASE2-RUNBOOK.md.
-  If omitted, uses $env:DATABASE_URL when set; otherwise omits DATABASE_URL (runtime uses code default).
+  Optional Postgres DSN for fallback path only. BigQuery is primary in current setup.
 
 .PARAMETER CostDataSource
-  For cost deploy: auto | bigquery | postgres (default postgres = local/self-hosted Postgres, not Cloud SQL).
+  For cost deploy: auto | bigquery | postgres (default bigquery).
 
 .PARAMETER AgentEngineId
   Numeric reasoning engine ID to update in place (keeps :query URL stable). Omit to create a new engine.
@@ -35,7 +33,13 @@ param(
     [string]$Region = 'us-central1',
     [string]$CostAgentQueryEndpoint = '',
     [string]$DatabaseUrl = '',
-    [string]$CostDataSource = 'postgres',
+    [string]$CostDataSource = 'bigquery',
+    [string]$BillingSchemaMode = 'clean_view',
+    [string]$BillingTable = 'clean_billing_view',
+    [string]$BillingDataset = 'gcp_billing_data',
+    [string]$BillingProject = '',
+    [string]$BillingDefaultTillNowScope = 'full_history',
+    [string]$BillingFullHistoryStartDate = '2026-01-01',
     [string]$AgentEngineId = '',
     [string]$CostAgentEngineId = '2939267809684750336',
     [string]$OrchestratorAgentEngineId = '8296018091465244672',
@@ -76,16 +80,24 @@ try {
         $db = $DatabaseUrl
         if (-not $db) { $db = $env:DATABASE_URL }
         $CostEnv = Join-Path $AgentDir '.env'
+        $billingProjectResolved = $BillingProject
+        if (-not $billingProjectResolved) { $billingProjectResolved = $Project }
         $lines = @(
             "GOOGLE_CLOUD_PROJECT=$Project"
             "GOOGLE_CLOUD_LOCATION=$Region"
             "COST_DATA_SOURCE=$CostDataSource"
+            "BQ_BILLING_PROJECT=$billingProjectResolved"
+            "BQ_BILLING_DATASET=$BillingDataset"
+            "BQ_BILLING_TABLE=$BillingTable"
+            "BILLING_BQ_SCHEMA_MODE=$BillingSchemaMode"
+            "BILLING_DEFAULT_TILL_NOW_SCOPE=$BillingDefaultTillNowScope"
+            "BILLING_FULL_HISTORY_START_DATE=$BillingFullHistoryStartDate"
         )
         if ($db) {
             $lines += "DATABASE_URL=$db"
         }
         Set-Content -Path $CostEnv -Value $lines
-        Write-Host ('Wrote {0} (COST_DATA_SOURCE={1}). Vertex must reach Postgres via a tunnel hostname (not 127.0.0.1). See docs/PHASE2-RUNBOOK.md' -f $CostEnv, $CostDataSource)
+        Write-Host ('Wrote {0} (COST_DATA_SOURCE={1}, BQ table={2}.{3}.{4})' -f $CostEnv, $CostDataSource, $billingProjectResolved, $BillingDataset, $BillingTable)
     }
 
     if ($Agent -eq 'orchestrator') {
@@ -103,6 +115,12 @@ try {
     }
 
     & $Adk @deployArgs $AgentDir
+
+    Write-Host ""
+    Write-Host "Deploy finished."
+    Write-Host "If you used -ForceNewEngine, copy the new reasoning engine identity from output/console and update:"
+    Write-Host "  - ORCHESTRATOR_AGENT_ENGINE_RESOURCE (local FastAPI proxy)"
+    Write-Host "  - COST_AGENT_ENGINE_RESOURCE or COST_AGENT_QUERY_ENDPOINT (orchestrator agent env)"
 } finally {
     Pop-Location
 }

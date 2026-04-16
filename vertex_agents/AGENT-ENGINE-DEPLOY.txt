@@ -9,25 +9,32 @@ Folders (pass these paths to adk deploy agent_engine):
   vertex_agents/cost_metrics_agent
   vertex_agents/pa_orchestrator_agent
 
-Deploy order
-------------
-1) Deploy cost_metrics_agent first. Configure DATABASE_URL for on-prem Postgres
-   (tunnel + Secret Manager); do not commit secrets.
-2) In Vertex / Agent Engine console, copy the HTTPS URL of the cost agent's
-   Agent Card JSON (often ends with /.well-known/agent.json).
-3) Set COST_AGENT_A2A_CARD_URL to that URL for the orchestrator and redeploy
-   pa_orchestrator_agent.
+Deploy order (fresh engines)
+----------------------------
+1) Deploy cost_metrics_agent first (BigQuery + clean_billing_view mode).
+2) Copy the new cost engine ID/resource from deploy output or console.
+3) Deploy pa_orchestrator_agent with COST_AGENT_QUERY_ENDPOINT pointing to the
+   new cost engine.
+4) Update local FastAPI proxy config:
+   - ORCHESTRATOR_LOCAL_CHAT=0 (or unset)
+   - ORCHESTRATOR_AGENT_ENGINE_RESOURCE=projects/.../reasoningEngines/<new orchestrator id>
 
 Telemetry
 ---------
-Use scripts/deploy-agent-engine.ps1 (includes):
+Use either deploy script (both include):
   --trace_to_cloud --otel_to_cloud
 
 PowerShell (from repo root)
 ---------------------------
   .\.venv\Scripts\Activate.ps1
-  .\scripts\deploy-agent-engine.ps1 -Agent cost
-  .\scripts\deploy-agent-engine.ps1 -Agent orchestrator
+  .\scripts\deploy-agent-engine.ps1 -Agent cost -ForceNewEngine
+  .\scripts\deploy-agent-engine.ps1 -Agent orchestrator -ForceNewEngine -CostAgentEngineId <NEW_COST_ENGINE_ID>
+
+macOS/Linux (from repo root)
+----------------------------
+  source .venv/bin/activate
+  ./scripts/deploy-agent-engine.sh cost --force-new-engine
+  ./scripts/deploy-agent-engine.sh orchestrator --force-new-engine --cost-agent-engine-id <NEW_COST_ENGINE_ID>
 
 Phase 3 helper (legacy orchestrator path)
 -----------------------------------------
@@ -40,20 +47,27 @@ Local stack check
 After running .\scripts\start-all.ps1:
   .\scripts\check-local-stack.ps1
 
-Next.js UI → Vertex Agent Engine (every chat invokes the engine)
----------------------------------------------------------------
+Next.js UI -> Vertex Agent Engine (every chat invokes the engine)
+------------------------------------------------------------------
 The browser cannot call reasoningEngines:query with your user credentials. Use the
 FastAPI orchestrator as a proxy:
 
 1. Deploy cost_metrics_agent then pa_orchestrator_agent (order above).
 2. gcloud auth application-default login  (same account that can invoke the engine)
-3. Export GOOGLE_CLOUD_PROJECT, GOOGLE_CLOUD_LOCATION, and EITHER:
+3. Export GOOGLE_CLOUD_PROJECT, GOOGLE_CLOUD_LOCATION, and:
      ORCHESTRATOR_AGENT_ENGINE_RESOURCE=projects/.../reasoningEngines/ID
-   OR the console "Copy query URL" value as:
-     ORCHESTRATOR_AGENT_ENGINE_QUERY_URL=https://...reasoningEngines/ID:query
+   Ensure ORCHESTRATOR_LOCAL_CHAT is unset/0.
 4. pip install -r agents/orchestrator/requirements.txt (includes google-cloud-aiplatform)
 5. Run uvicorn on agents/orchestrator/main.py :8000
 6. Keep frontend NEXT_PUBLIC_ORCHESTRATOR_URL=http://127.0.0.1:8000
 
-GET /health shows agent_engine_chat_enabled: true when project + resource are set.
+GET /health shows agent_engine_chat_enabled: true when project + resource are set and local-chat override is off.
 Agent Engine metrics in the console should increment when you send messages.
+
+Evaluation + Memories tabs
+--------------------------
+- Evaluation runs are created via SDK/notebook (console currently does not create them directly).
+- To populate Memories/Sessions/Traces, run several turns through the deployed orchestrator engine in the same session.
+- Use helper scripts:
+  - scripts/agent-engine-memory-smoke.py
+  - scripts/agent-engine-create-eval.py

@@ -42,12 +42,34 @@ def _resource_from_query_url(url: str) -> str:
     return m.group(1) if m else ""
 
 
+def _project_from_resource(resource: str) -> str:
+    m = re.search(r"projects/([^/]+)/locations/", resource, re.I)
+    return m.group(1) if m else ""
+
+
+def _location_from_resource(resource: str) -> str:
+    m = re.search(r"locations/([^/]+)/reasoningEngines/", resource, re.I)
+    return m.group(1) if m else ""
+
+
 def resolved_engine_resource() -> str:
     if _ORCHESTRATOR_RESOURCE:
         return _ORCHESTRATOR_RESOURCE
     if _ORCHESTRATOR_QUERY_URL:
         return _resource_from_query_url(_ORCHESTRATOR_QUERY_URL)
     return ""
+
+
+def resolved_project() -> str:
+    if _PROJECT:
+        return _PROJECT
+    return _project_from_resource(resolved_engine_resource())
+
+
+def resolved_location() -> str:
+    if _LOCATION:
+        return _LOCATION
+    return _location_from_resource(resolved_engine_resource()) or "us-central1"
 
 
 def is_agent_engine_chat_enabled() -> bool:
@@ -60,30 +82,111 @@ def is_agent_engine_chat_enabled() -> bool:
         "yes",
     ):
         return False
-    return bool(resolved_engine_resource() and _PROJECT)
+    return bool(resolved_engine_resource() and resolved_project())
 
 
 def _extract_text_from_part(p: dict) -> str:
     if p.get("text"):
         return str(p["text"])
-    fc = p.get("function_call")
-    if isinstance(fc, dict):
-        name = fc.get("name", "")
-        args = fc.get("args") if "args" in fc else fc.get("arguments")
+    # Suppress tool-call/function-response chatter in UI stream text.
+    return ""
+
+
+def _unwrap_result_text(value: Any) -> str:
+    """Best-effort recursive unwrapping for nested {"result": "..."} payloads."""
+    if value is None:
+        return ""
+    if isinstance(value, dict):
+        if "response" in value:
+            unwrapped_response = _unwrap_result_text(value.get("response"))
+            if unwrapped_response:
+                return unwrapped_response
+        if "result" in value:
+            return _unwrap_result_text(value.get("result"))
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, list):
+        return json.dumps(value, ensure_ascii=False)
+    text = str(value).strip()
+    if not text:
+        return ""
+    try:
+        loaded = json.loads(text)
+    except Exception:
+        return text
+    return _unwrap_result_text(loaded)
+
+
+def _extract_first_json_snippet(text: str) -> str:
+    """Extract first balanced JSON object/array snippet from text."""
+    start = -1
+    for i, ch in enumerate(text):
+        if ch in "[{":
+            start = i
+            break
+    if start < 0:
+        return ""
+    stack: list[str] = []
+    pair = {"[": "]", "{": "}"}
+    in_string = False
+    escape = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+            continue
+        if ch in pair:
+            stack.append(pair[ch])
+            continue
+        if ch in ("]", "}"):
+            if not stack or stack[-1] != ch:
+                return ""
+            stack.pop()
+            if not stack:
+                snippet = text[start : i + 1].strip()
+                try:
+                    json.loads(snippet)
+                    return snippet
+                except Exception:
+                    return ""
+    return ""
+
+
+def _extract_structured_result_from_event(event: dict) -> str:
+    """
+    Pull structured JSON rows from function_response payloads and format for
+    frontend table parser.
+    """
+    content = event.get("content")
+    if not isinstance(content, dict):
+        return ""
+    parts = content.get("parts")
+    if not isinstance(parts, list):
+        return ""
+    for p in parts:
+        if not isinstance(p, dict):
+            continue
+        fr = p.get("function_response")
+        if fr is None:
+            continue
+        payload_text = _unwrap_result_text(fr)
+        if not payload_text:
+            continue
+        snippet = _extract_first_json_snippet(payload_text)
+        if not snippet:
+            continue
         return (
-            f"[tool call: {name}] "
-            f"{json.dumps(args, ensure_ascii=False) if args is not None else ''}"
-        ).strip()
-    fr = p.get("function_response")
-    if isinstance(fr, dict):
-        inner = fr.get("response")
-        if inner is not None:
-            if isinstance(inner, (dict, list)):
-                return json.dumps(inner, ensure_ascii=False)
-            return str(inner)
-        return json.dumps(fr, ensure_ascii=False)
-    if isinstance(fr, str):
-        return fr
+            "Source: agent-engine specialist; source=bigquery; currency=INR\n\n"
+            "Result (amounts in INR ₹ where applicable):\n"
+            f"{snippet}"
+        )
     return ""
 
 
@@ -106,7 +209,7 @@ def _extract_text_from_vertex_event(event: dict) -> str:
 def _create_vertex_session(client_session_id: str) -> tuple[str, str]:
     """Sync: create Agent Engine session (runs in thread pool)."""
     resource = resolved_engine_resource()
-    vertexai.init(project=_PROJECT, location=_LOCATION)
+    vertexai.init(project=resolved_project(), location=resolved_location())
     engine = agent_engines.get(resource)
     user_id = f"ui-{client_session_id}"
     sess = engine.create_session(user_id=user_id)
@@ -159,7 +262,7 @@ async def _iter_stream_query(
 
     def worker() -> None:
         try:
-            vertexai.init(project=_PROJECT, location=_LOCATION)
+            vertexai.init(project=resolved_project(), location=resolved_location())
             engine = agent_engines.get(resource)
             for ev in engine.stream_query(
                 message=message,
@@ -201,6 +304,7 @@ async def stream_chat_via_agent_engine(
         pool, tenant_id, owner_user_id, client_session_id
     )
     task_id = f"task-{uuid.uuid4().hex[:12]}"
+    structured_sent = False
 
     try:
         async for ev in _iter_stream_query(message.strip(), user_id, engine_sid):
@@ -209,6 +313,14 @@ async def stream_chat_via_agent_engine(
                 payload = json.dumps({"error": True, "detail": err}, ensure_ascii=False)
                 yield f"data: {payload}\n\n".encode()
                 return
+            if not structured_sent:
+                structured = _extract_structured_result_from_event(ev)
+                if structured:
+                    structured_sent = True
+                    yield sse_pack_a2a(
+                        task_id, "working", structured, completed=False
+                    ).encode()
+                    continue
             delta = _extract_text_from_vertex_event(ev)
             if delta:
                 yield sse_pack_a2a(

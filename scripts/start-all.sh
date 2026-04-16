@@ -14,6 +14,14 @@ if [[ -f "$ROOT/config/gcp.env" ]]; then
   echo ">>> Loaded config/gcp.env (GOOGLE_CLOUD_PROJECT=${GOOGLE_CLOUD_PROJECT:-})"
 fi
 
+if [[ -n "${ORCHESTRATOR_AGENT_ENGINE_RESOURCE:-}" ]] && [[ "${ORCHESTRATOR_LOCAL_CHAT:-}" =~ ^(1|true|yes)$ ]]; then
+  echo ">>> Warning: ORCHESTRATOR_LOCAL_CHAT is enabled; UI chat will bypass Agent Engine despite ORCHESTRATOR_AGENT_ENGINE_RESOURCE being set."
+fi
+
+# Avoid stale processes keeping old env vars / ports.
+pkill -f "uvicorn main:app" 2>/dev/null || true
+pkill -f "next dev" 2>/dev/null || true
+
 PYTHON_BIN="$ROOT/.venv/bin/python"
 if [[ ! -x "$PYTHON_BIN" ]]; then
   echo ">>> Creating .venv..."
