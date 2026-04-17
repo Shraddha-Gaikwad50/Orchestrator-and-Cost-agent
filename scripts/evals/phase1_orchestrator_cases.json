@@ -1,0 +1,115 @@
+[
+  {
+    "case_id": "ORCH-001",
+    "category": "routing_metrics",
+    "turns": [
+      { "role": "user", "text": "What was our total spend last month?" }
+    ],
+    "expected_route": "delegate_to_cost_specialist",
+    "must_contain_any": ["source=bigquery", "currency=INR"],
+    "severity": "critical"
+  },
+  {
+    "case_id": "ORCH-002",
+    "category": "routing_chitchat",
+    "turns": [
+      { "role": "user", "text": "Hello there" }
+    ],
+    "expected_route": "direct_reply",
+    "must_not_contain_any": ["source=bigquery", "llm-sql", "tasks/send"],
+    "severity": "critical"
+  },
+  {
+    "case_id": "ORCH-003",
+    "category": "routing_out_of_scope",
+    "turns": [
+      { "role": "user", "text": "Write me a poem about the moon." }
+    ],
+    "expected_route": "direct_reply_out_of_scope",
+    "must_not_contain_any": ["source=bigquery", "llm-sql"],
+    "severity": "high"
+  },
+  {
+    "case_id": "ORCH-004",
+    "category": "context_followup_same_project",
+    "turns": [
+      { "role": "user", "text": "Show spend for jaybel-dev project this month." },
+      { "role": "user", "text": "Now give me top 3 services for the same project." }
+    ],
+    "expected_route": "delegate_to_cost_specialist",
+    "expected_context": {
+      "inherits_project_from_previous_turn": true
+    },
+    "severity": "critical"
+  },
+  {
+    "case_id": "ORCH-005",
+    "category": "context_followup_same_window",
+    "turns": [
+      { "role": "user", "text": "What did we spend last month?" },
+      { "role": "user", "text": "Break that down by service." }
+    ],
+    "expected_route": "delegate_to_cost_specialist",
+    "expected_context": {
+      "inherits_time_window_from_previous_turn": true
+    },
+    "severity": "critical"
+  },
+  {
+    "case_id": "ORCH-006",
+    "category": "idempotent_retry",
+    "turns": [
+      { "role": "user", "text": "Show top 5 services this month.", "client_message_id": "retry-abc-001" },
+      { "role": "user", "text": "Show top 5 services this month.", "client_message_id": "retry-abc-001" }
+    ],
+    "expected_route": "idempotent_replay",
+    "expected_context": {
+      "duplicate_user_turn_not_duplicated": true
+    },
+    "severity": "high"
+  },
+  {
+    "case_id": "ORCH-007",
+    "category": "clear_memory",
+    "turns": [
+      { "role": "user", "text": "Use project jaybel-dev and last month." },
+      { "role": "user", "text": "clear" },
+      { "role": "user", "text": "Show top services." }
+    ],
+    "expected_route": "clear_then_no_context_carry",
+    "expected_context": {
+      "memory_cleared": true
+    },
+    "severity": "critical"
+  },
+  {
+    "case_id": "ORCH-008",
+    "category": "project_axis_not_env",
+    "turns": [
+      { "role": "user", "text": "What are the different projects and each with cost?" }
+    ],
+    "expected_route": "delegate_to_cost_specialist",
+    "must_not_contain_any": ["breakdown by env", "Environment"],
+    "severity": "critical"
+  },
+  {
+    "case_id": "ORCH-009",
+    "category": "ambiguous_cost_clarification",
+    "turns": [
+      { "role": "user", "text": "What did we spend on Cloud SQL?" }
+    ],
+    "expected_route": "delegate_to_cost_specialist",
+    "must_contain_any": ["time window", "last 7 days", "this month", "full history"],
+    "severity": "high"
+  },
+  {
+    "case_id": "ORCH-010",
+    "category": "schema_question_delegate",
+    "turns": [
+      { "role": "user", "text": "Does project_name exist as a column?" }
+    ],
+    "expected_route": "delegate_to_cost_specialist",
+    "must_contain_any": ["project_name", "exists"],
+    "severity": "high"
+  }
+]

@@ -1,0 +1,147 @@
+[
+  {
+    "case_id": "COST-001",
+    "category": "time_window_total",
+    "prompt": "What was our total spend last month?",
+    "expected_path": "bigquery_llm_sql",
+    "expected_source": "bigquery",
+    "expected_filters": {
+      "period_type": "last_month",
+      "wants_total": true
+    },
+    "expected_output_shape": {
+      "type": "total",
+      "required_keys_any_row": ["total_inr"]
+    },
+    "must_contain_any": ["last month", "source=bigquery", "currency=INR"],
+    "severity": "critical"
+  },
+  {
+    "case_id": "COST-002",
+    "category": "time_window_combined",
+    "prompt": "Give total spend for last month and this month till date.",
+    "expected_path": "bigquery_llm_sql",
+    "expected_source": "bigquery",
+    "expected_filters": {
+      "period_type": "last_month_plus_this_month_to_date",
+      "wants_total": true
+    },
+    "must_contain_any": ["source=bigquery", "currency=INR"],
+    "severity": "critical"
+  },
+  {
+    "case_id": "COST-003",
+    "category": "project_axis",
+    "prompt": "What are the different projects we have, and break down each with cost?",
+    "expected_path": "bigquery_llm_sql",
+    "expected_source": "bigquery",
+    "expected_filters": {
+      "breakdown_axis": "project"
+    },
+    "expected_output_shape": {
+      "type": "table",
+      "required_keys_any_row": ["project_id", "total_inr"]
+    },
+    "must_not_contain_any": ["breakdown by env", "Environment"],
+    "severity": "critical"
+  },
+  {
+    "case_id": "COST-004",
+    "category": "service_axis_topn",
+    "prompt": "Show top 5 most expensive services this month.",
+    "expected_path": "bigquery_llm_sql",
+    "expected_source": "bigquery",
+    "expected_filters": {
+      "period_type": "this_month_to_date",
+      "wants_top": true,
+      "top_n": 5
+    },
+    "expected_output_shape": {
+      "type": "table",
+      "required_keys_any_row": ["cost_inr"]
+    },
+    "severity": "high"
+  },
+  {
+    "case_id": "COST-005",
+    "category": "service_filter",
+    "prompt": "How much did we spend on Cloud SQL in the last 30 days?",
+    "expected_path": "bigquery_llm_sql",
+    "expected_source": "bigquery",
+    "expected_filters": {
+      "period_type": "last_30_days",
+      "service_contains": "cloud sql",
+      "wants_total": true
+    },
+    "must_contain_any": ["Cloud SQL", "source=bigquery"],
+    "severity": "high"
+  },
+  {
+    "case_id": "COST-006",
+    "category": "region_filter",
+    "prompt": "Show spend in the asia-south1 region for this month.",
+    "expected_path": "bigquery_llm_sql",
+    "expected_source": "bigquery",
+    "expected_filters": {
+      "period_type": "this_month_to_date",
+      "billing_region": "asia-south1"
+    },
+    "severity": "high"
+  },
+  {
+    "case_id": "COST-007",
+    "category": "schema_columns",
+    "prompt": "What are all the column names in the billing view?",
+    "expected_path": "schema_query",
+    "expected_source": "bigquery",
+    "expected_output_shape": {
+      "type": "schema_rows",
+      "required_keys_any_row": ["column_name"]
+    },
+    "must_contain_any": ["column", "billing"],
+    "severity": "critical"
+  },
+  {
+    "case_id": "COST-008",
+    "category": "schema_column_exists",
+    "prompt": "Does project_name exist as a column?",
+    "expected_path": "schema_query",
+    "expected_source": "bigquery",
+    "must_contain_any": ["project_name", "exists"],
+    "severity": "high"
+  },
+  {
+    "case_id": "COST-009",
+    "category": "schema_distinct_values",
+    "prompt": "List all unique values in project_name column.",
+    "expected_path": "schema_query",
+    "expected_source": "bigquery",
+    "must_contain_any": ["project_name"],
+    "severity": "high"
+  },
+  {
+    "case_id": "COST-010",
+    "category": "schema_invalid_column",
+    "prompt": "List unique values in fake_column_xyz.",
+    "expected_path": "schema_query",
+    "expected_source": "bigquery",
+    "must_contain_any": ["does not exist", "column"],
+    "severity": "critical"
+  },
+  {
+    "case_id": "COST-011",
+    "category": "clarification_ambiguous_time",
+    "prompt": "What are the most expensive services?",
+    "expected_path": "clarification",
+    "must_contain_any": ["time window", "last 7 days", "this month"],
+    "severity": "critical"
+  },
+  {
+    "case_id": "COST-012",
+    "category": "clarification_compare_scope",
+    "prompt": "Compare spend.",
+    "expected_path": "clarification",
+    "must_contain_any": ["compare", "prod vs dev", "project", "service"],
+    "severity": "critical"
+  }
+]

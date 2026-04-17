@@ -1,0 +1,21 @@
+{
+  "phase": "phase1",
+  "description": "Golden dataset split for deployed Agent Engine evals (no scoring in this phase).",
+  "suites": [
+    {
+      "agent": "cost_metrics_agent",
+      "cases_file": "scripts/evals/phase1_cost_metrics_cases.json",
+      "purpose": "Cost correctness, schema checks, ambiguity clarifications, and guardrails"
+    },
+    {
+      "agent": "pa_orchestrator_agent",
+      "cases_file": "scripts/evals/phase1_orchestrator_cases.json",
+      "purpose": "Routing, context carryover, memory clear/idempotency, and specialist delegation checks"
+    }
+  ],
+  "notes": [
+    "Ground truth for numeric checks should be generated from deterministic BigQuery SQL, not model-generated answers.",
+    "Use phase0 profile to freeze runtime env before collecting baseline outputs.",
+    "Scoring/threshold enforcement is planned for phase2+."
+  ]
+}

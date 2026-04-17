@@ -1,0 +1,109 @@
+name: Agent Evals
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - "scripts/agent-engine-create-eval.py"
+      - "scripts/evals/**"
+      - ".github/workflows/agent-evals.yml"
+      - "vertex_agents/**"
+      - "agents/orchestrator/**"
+      - "config/gcp.env.example"
+
+jobs:
+  evals:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      GOOGLE_CLOUD_PROJECT: ${{ vars.GOOGLE_CLOUD_PROJECT }}
+      GOOGLE_CLOUD_LOCATION: ${{ vars.GOOGLE_CLOUD_LOCATION || 'us-central1' }}
+      COST_ENGINE_RESOURCE: ${{ vars.COST_ENGINE_RESOURCE }}
+      ORCHESTRATOR_ENGINE_RESOURCE: ${{ vars.ORCHESTRATOR_ENGINE_RESOURCE }}
+      COST_DATA_SOURCE: ${{ vars.COST_DATA_SOURCE || 'auto' }}
+      BQ_BILLING_PROJECT: ${{ vars.BQ_BILLING_PROJECT }}
+      BQ_BILLING_DATASET: ${{ vars.BQ_BILLING_DATASET || 'gcp_billing_data' }}
+      BQ_BILLING_TABLE: ${{ vars.BQ_BILLING_TABLE || 'clean_billing_view' }}
+      BILLING_BQ_SCHEMA_MODE: ${{ vars.BILLING_BQ_SCHEMA_MODE || 'clean_view' }}
+      BILLING_AGENT_LLM_SQL: ${{ vars.BILLING_AGENT_LLM_SQL || '1' }}
+      BILLING_CONTEXT_ROUTER_ENABLED: ${{ vars.BILLING_CONTEXT_ROUTER_ENABLED || '1' }}
+      BILLING_LLM_PROVIDER: ${{ vars.BILLING_LLM_PROVIDER || 'auto' }}
+      BILLING_LLM_MAX_BYTES_BILLED: ${{ vars.BILLING_LLM_MAX_BYTES_BILLED || '1000000000' }}
+      BILLING_LLM_MAX_LOOKBACK_DAYS: ${{ vars.BILLING_LLM_MAX_LOOKBACK_DAYS || '30' }}
+      BILLING_LLM_ALLOW_EXPLICIT_CALENDAR_WINDOW: ${{ vars.BILLING_LLM_ALLOW_EXPLICIT_CALENDAR_WINDOW || '1' }}
+      BILLING_LLM_ALLOW_LONG_RANGE: ${{ vars.BILLING_LLM_ALLOW_LONG_RANGE || '0' }}
+      BILLING_DEFAULT_TILL_NOW_SCOPE: ${{ vars.BILLING_DEFAULT_TILL_NOW_SCOPE || 'full_history' }}
+      BILLING_FULL_HISTORY_START_DATE: ${{ vars.BILLING_FULL_HISTORY_START_DATE || '2026-01-01' }}
+      ENABLE_VERTEX_ROUTING: ${{ vars.ENABLE_VERTEX_ROUTING || '1' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Validate required CI variables
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=0
+          for k in GOOGLE_CLOUD_PROJECT COST_ENGINE_RESOURCE ORCHESTRATOR_ENGINE_RESOURCE; do
+            if [ -z "${!k:-}" ]; then
+              echo "Missing required repository variable: $k"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "Configure repository variables before running evals."
+            exit 1
+          fi
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-adk.txt
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: "${{ secrets.GCP_SA_KEY_JSON }}"
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Run cost agent eval suite (gated)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p logs
+          python scripts/agent-engine-create-eval.py \
+            --resource "$COST_ENGINE_RESOURCE" \
+            --profile scripts/evals/phase0_eval_profile.json \
+            --cases scripts/evals/phase1_cost_metrics_cases.json \
+            --thresholds-file scripts/evals/phase3_thresholds.json \
+            --out logs/phase3-cost-gated-report.json
+
+      - name: Run orchestrator eval suite (gated)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/agent-engine-create-eval.py \
+            --resource "$ORCHESTRATOR_ENGINE_RESOURCE" \
+            --profile scripts/evals/phase0_eval_profile.json \
+            --cases scripts/evals/phase1_orchestrator_cases.json \
+            --thresholds-file scripts/evals/phase3_thresholds.json \
+            --out logs/phase3-orchestrator-gated-report.json
+
+      - name: Upload eval reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-eval-reports
+          path: |
+            logs/phase3-cost-gated-report.json
+            logs/phase3-orchestrator-gated-report.json

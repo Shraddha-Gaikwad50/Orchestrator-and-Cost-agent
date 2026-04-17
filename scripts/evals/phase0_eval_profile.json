@@ -1,0 +1,38 @@
+{
+  "profile_name": "vertex-agent-engine-phase0-v1",
+  "project": "gls-training-486405",
+  "location": "us-central1",
+  "targets": {
+    "agent": "cost_metrics_agent",
+    "resource": "projects/gls-training-486405/locations/us-central1/reasoningEngines/5616525846761177088"
+  },
+  "frozen_env": {
+    "GOOGLE_CLOUD_PROJECT": "gls-training-486405",
+    "GOOGLE_CLOUD_LOCATION": "us-central1",
+    "COST_DATA_SOURCE": "auto",
+    "BQ_BILLING_PROJECT": "gls-training-486405",
+    "BQ_BILLING_DATASET": "gcp_billing_data",
+    "BQ_BILLING_TABLE": "clean_billing_view",
+    "BILLING_BQ_SCHEMA_MODE": "clean_view",
+    "BILLING_AGENT_LLM_SQL": "1",
+    "BILLING_CONTEXT_ROUTER_ENABLED": "1",
+    "BILLING_LLM_PROVIDER": "auto",
+    "BILLING_LLM_MAX_BYTES_BILLED": "1000000000",
+    "BILLING_LLM_MAX_LOOKBACK_DAYS": "30",
+    "BILLING_LLM_ALLOW_EXPLICIT_CALENDAR_WINDOW": "1",
+    "BILLING_LLM_ALLOW_LONG_RANGE": "0",
+    "BILLING_DEFAULT_TILL_NOW_SCOPE": "full_history",
+    "BILLING_FULL_HISTORY_START_DATE": "2026-01-01",
+    "ENABLE_VERTEX_ROUTING": "1"
+  },
+  "session_policy": {
+    "default": "fresh_session_per_case",
+    "multi_turn": "shared_session_within_case_only",
+    "cross_case_reuse": false
+  },
+  "data_window_policy": {
+    "timezone": "UTC",
+    "prefer_fixed_historical_windows": true,
+    "avoid_volatile_today_windows_for_numeric_baselines": true
+  }
+}
