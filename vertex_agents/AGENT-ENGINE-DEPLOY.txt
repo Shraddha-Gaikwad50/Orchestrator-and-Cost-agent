@@ -61,13 +61,16 @@ Agent Engine metrics in the console should increment when you send messages.
 Evaluation + Memories tabs
 --------------------------
 - Memories tab population:
+  - Agents must be memory-enabled (PreloadMemoryTool + after_agent_callback memory writes), then redeployed.
   - Run multi-turn scenarios against one or more deployed engines:
     - scripts/agent-engine-memory-smoke.py
+  - Script now triggers explicit session->memory generation and can verify via memory search.
   - Example:
     - ./.venv/bin/python scripts/agent-engine-memory-smoke.py \
       --resource projects/.../reasoningEngines/<ORCHESTRATOR_ID> \
       --resource projects/.../reasoningEngines/<COST_ID> \
       --scenarios scripts/evals/memory_seed_cases.json \
+      --verify-memory \
       --out logs/agent-engine-memory-seed-report.json
 
 - Evaluation tab population:

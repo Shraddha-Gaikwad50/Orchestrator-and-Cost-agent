@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import uuid
 
+from google.adk.agents.context import Context
 from google.adk.agents import LlmAgent
-from google.adk.tools import FunctionTool
+from google.adk.tools import FunctionTool, ToolContext
+from google.adk.tools.preload_memory_tool import PreloadMemoryTool
 import vertexai
 import vertexai.agent_engines as agent_engines
+
+logger = logging.getLogger(__name__)
 
 _ORCHESTRATOR_INSTRUCTION = """You are a routing orchestrator for GCP cost intelligence.
 - For any cost, billing, spend, service-cost, project-cost, region-cost, trend, or usage question: ALWAYS call query_cost_specialist first.
@@ -126,7 +131,13 @@ def _summarize_events_for_empty_response(events: list) -> str:
     return "\n".join(lines)
 
 
-def query_cost_specialist(question: str) -> str:
+def _specialist_user_id_from_context(context: ToolContext | None) -> str:
+    if context and getattr(context, "user_id", None):
+        return str(context.user_id).strip()
+    return f"pa-orchestrator-{uuid.uuid4().hex[:8]}"
+
+
+def query_cost_specialist(question: str, tool_context: ToolContext | None = None) -> str:
     """Query deployed cost specialist Agent Engine and return its response text."""
     resource_name = _resolve_resource_name()
     if not resource_name:
@@ -139,7 +150,8 @@ def query_cost_specialist(question: str) -> str:
     try:
         vertexai.init(project=_PROJECT, location=_LOCATION)
         engine = agent_engines.get(resource_name)
-        user_id = f"pa-orchestrator-{uuid.uuid4().hex[:8]}"
+        # Keep specialist memory/user scope stable across turns for the same user.
+        user_id = _specialist_user_id_from_context(tool_context)
         session = engine.create_session(user_id=user_id)
         session_id = session.get("id") if isinstance(session, dict) else None
         events = list(
@@ -161,9 +173,26 @@ def query_cost_specialist(question: str) -> str:
         return f"Specialist query failed: {e}"
 
 
+async def _persist_turn_memory(callback_context: Context) -> None:
+    """
+    Trigger incremental memory generation after each turn.
+    Use recent events to avoid re-processing the whole session repeatedly.
+    """
+    try:
+        events = getattr(callback_context.session, "events", None) or []
+        if isinstance(events, list) and events:
+            await callback_context.add_events_to_memory(events=events[-8:])
+        else:
+            await callback_context.add_session_to_memory()
+    except Exception:
+        logger.exception("Failed to persist orchestrator memory")
+    return None
+
+
 root_agent = LlmAgent(
     name="pa_orchestrator",
     model="gemini-2.5-flash",
     instruction=_ORCHESTRATOR_INSTRUCTION,
-    tools=[FunctionTool(query_cost_specialist)],
+    tools=[PreloadMemoryTool(), FunctionTool(query_cost_specialist)],
+    after_agent_callback=_persist_turn_memory,
 )

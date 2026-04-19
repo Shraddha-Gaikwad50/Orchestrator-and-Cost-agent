@@ -45,6 +45,9 @@ echo "Eval GCS dest: $GCS_DEST"
   --resource "$ORCH_RESOURCE" \
   --resource "$COST_RESOURCE" \
   --scenarios "scripts/evals/memory_seed_cases.json" \
+  --verify-memory \
+  --memory-search-wait-seconds 30 \
+  --memory-search-interval-seconds 5 \
   --out "logs/agent-engine-memory-seed-report-$TIMESTAMP.json"
 
 ./.venv/bin/python "scripts/agent-engine-create-eval.py" \

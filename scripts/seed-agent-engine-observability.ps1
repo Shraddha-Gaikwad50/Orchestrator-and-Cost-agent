@@ -37,6 +37,9 @@ $timestamp = (Get-Date).ToUniversalTime().ToString("yyyyMMddTHHmmssZ")
   --resource $orchestratorResource `
   --resource $CostAgentResource `
   --scenarios "scripts/evals/memory_seed_cases.json" `
+  --verify-memory `
+  --memory-search-wait-seconds 30 `
+  --memory-search-interval-seconds 5 `
   --out "logs/agent-engine-memory-seed-report-$timestamp.json"
 
 & ".\.venv\Scripts\python.exe" "scripts/agent-engine-create-eval.py" `

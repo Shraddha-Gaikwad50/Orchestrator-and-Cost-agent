@@ -136,6 +136,8 @@ To ensure Agent Engine console tabs are populated with real data:
   - `scripts/agent-engine-memory-smoke.py`
   - Supports multiple engine resources in one run.
   - Uses reusable multi-turn scenarios from `scripts/evals/memory_seed_cases.json`.
+  - Explicitly triggers `add_session_to_memory` per seeded session.
+  - Optional `--verify-memory` polls memory search and records result counts.
   - Writes run metadata to `logs/agent-engine-memory-seed-report-*.json`.
 
 - Evaluation publishing (Evaluation tab):

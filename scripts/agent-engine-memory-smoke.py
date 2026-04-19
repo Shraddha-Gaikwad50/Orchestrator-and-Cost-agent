@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,18 +37,20 @@ def _default_scenarios() -> list[dict]:
         {
             "name": "cost_preference_memory",
             "turns": [
-                "Hello, remember I care about spend by project and service.",
-                "What are my top services this month?",
-                "Now focus only on invoice-like cost categories and summarize.",
+                "Remember this preference: I always prefer cost summaries grouped by project and service.",
+                "For future answers, default to top 5 services unless I ask otherwise.",
+                "Acknowledge these preferences in one sentence.",
             ],
+            "verify_query": "What are my preferences for cost summaries?",
         },
         {
             "name": "schema_and_followup_memory",
             "turns": [
-                "List all columns available in the billing view.",
-                "Now tell me if project_name exists.",
-                "Great. Keep project_name in context for future follow-up questions.",
+                "Remember this: my default schema focus column is project_name.",
+                "Remember this too: when I ask unique values, I usually mean project_name unless I specify a different column.",
+                "Confirm you stored my schema defaults.",
             ],
+            "verify_query": "What schema defaults did I share?",
         },
     ]
 
@@ -105,6 +109,30 @@ def _run_scenario(engine, resource: str, scenario: dict) -> dict:
     }
 
 
+async def _trigger_memory_generation(engine, user_id: str, session_id: str) -> dict:
+    session_obj = await engine.async_get_session(user_id=user_id, session_id=session_id)
+    if not isinstance(session_obj, dict):
+        raise RuntimeError("async_get_session returned unexpected payload")
+    return await engine.async_add_session_to_memory(session=session_obj)
+
+
+async def _search_memory(engine, user_id: str, query: str) -> dict:
+    return await engine.async_search_memory(user_id=user_id, query=query)
+
+
+def _extract_memory_count(search_payload: dict) -> int:
+    if not isinstance(search_payload, dict):
+        return 0
+    candidates = search_payload.get("memories")
+    if isinstance(candidates, list):
+        return len(candidates)
+    for key in ("results", "items", "matches"):
+        val = search_payload.get(key)
+        if isinstance(val, list):
+            return len(val)
+    return 0
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -125,6 +153,28 @@ def main() -> None:
         "--out",
         default="logs/agent-engine-memory-seed-report.json",
         help="Where to write memory seeding report JSON",
+    )
+    parser.add_argument(
+        "--skip-memory-trigger",
+        action="store_true",
+        help="Skip explicit add_session_to_memory call",
+    )
+    parser.add_argument(
+        "--verify-memory",
+        action="store_true",
+        help="Search memory after generation and report count",
+    )
+    parser.add_argument(
+        "--memory-search-wait-seconds",
+        type=int,
+        default=20,
+        help="Max wait for memory search to return results",
+    )
+    parser.add_argument(
+        "--memory-search-interval-seconds",
+        type=int,
+        default=4,
+        help="Polling interval for memory search",
     )
     args = parser.parse_args()
 
@@ -147,7 +197,56 @@ def main() -> None:
     for resource in resources:
         engine = agent_engines.get(resource)
         for scenario in scenarios:
-            rows.append(_run_scenario(engine=engine, resource=resource, scenario=scenario))
+            row = _run_scenario(engine=engine, resource=resource, scenario=scenario)
+            user_id = row["user_id"]
+            session_id = row["session_id"]
+
+            trigger_payload: dict | None = None
+            trigger_error: str | None = None
+            if not args.skip_memory_trigger:
+                try:
+                    trigger_payload = asyncio.run(
+                        _trigger_memory_generation(
+                            engine=engine, user_id=user_id, session_id=session_id
+                        )
+                    )
+                except Exception as exc:
+                    trigger_error = str(exc)
+
+            verify_query = str(scenario.get("verify_query") or "").strip()
+            verify_result: dict | None = None
+            verify_count = 0
+            verify_passed: bool | None = None
+            verify_error: str | None = None
+            if args.verify_memory and verify_query:
+                deadline = time.time() + max(args.memory_search_wait_seconds, 1)
+                while time.time() < deadline:
+                    try:
+                        verify_result = asyncio.run(
+                            _search_memory(engine=engine, user_id=user_id, query=verify_query)
+                        )
+                        verify_count = _extract_memory_count(verify_result)
+                        if verify_count > 0:
+                            verify_passed = True
+                            break
+                    except Exception as exc:
+                        verify_error = str(exc)
+                        break
+                    time.sleep(max(args.memory_search_interval_seconds, 1))
+                if verify_passed is None:
+                    verify_passed = verify_count > 0
+
+            row["memory_generation_requested"] = not args.skip_memory_trigger
+            row["memory_generation_payload"] = trigger_payload
+            row["memory_generation_error"] = trigger_error
+            row["memory_verify_query"] = verify_query or None
+            row["memory_verify_enabled"] = bool(args.verify_memory and verify_query)
+            row["memory_verify_result_count"] = verify_count
+            row["memory_verify_passed"] = verify_passed
+            row["memory_verify_error"] = verify_error
+            if verify_result is not None:
+                row["memory_verify_result"] = verify_result
+            rows.append(row)
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
