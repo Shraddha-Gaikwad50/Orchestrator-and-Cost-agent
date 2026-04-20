@@ -65,6 +65,7 @@ There is no local `/tasks/send` specialist path anymore.
 - Routes cost and billing/schema questions to cost specialist tool.
 - Avoids speculation; asks clarification when needed.
 - Summarizes specialist output for user-facing responses.
+- Memory-enabled via ADK (`PreloadMemoryTool` + after-turn memory persistence callback).
 
 ### C) Deployed Cost Agent (`vertex_agents/cost_metrics_agent`)
 
@@ -77,6 +78,7 @@ There is no local `/tasks/send` specialist path anymore.
   - list columns
   - check if column exists
   - distinct values for supported scalar columns
+- Memory-enabled via ADK (`PreloadMemoryTool` + after-turn memory persistence callback).
 
 ## 6) BigQuery Source & Schema Mode
 
@@ -139,6 +141,7 @@ To ensure Agent Engine console tabs are populated with real data:
   - Explicitly triggers `add_session_to_memory` per seeded session.
   - Optional `--verify-memory` polls memory search and records result counts.
   - Writes run metadata to `logs/agent-engine-memory-seed-report-*.json`.
+  - Console display can lag briefly after seeding; wait 30-90 seconds and refresh.
 
 - Evaluation publishing (Evaluation tab):
   - `scripts/agent-engine-create-eval.py`

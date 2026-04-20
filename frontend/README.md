@@ -48,9 +48,23 @@ From repo root (Windows PowerShell):
 
 This starts:
 - Postgres on `5435` (host; compose mapping)
-- Cost agent on `8001`
 - Orchestrator on `8000`
 - Frontend on `3000`
+
+Note: there is no local `cost-agent` service in this architecture anymore. Cost logic runs in the deployed `cost_metrics_agent` via the deployed `pa_orchestrator_agent` that the local orchestrator bridge calls.
+
+## Agent Engine Observability (Memories + Evaluation)
+
+From repo root, use the one-shot helper after deploys to populate observability tabs:
+
+- macOS/Linux: `scripts/seed-agent-engine-observability.sh`
+- Windows: `scripts/seed-agent-engine-observability.ps1`
+
+Required env vars:
+
+- `ORCHESTRATOR_AGENT_ENGINE_RESOURCE`
+- `COST_AGENT_ENGINE_RESOURCE`
+- `AGENT_ENGINE_EVAL_GCS_DEST`
 
 Stop services:
 
