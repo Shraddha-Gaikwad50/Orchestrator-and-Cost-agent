@@ -41,6 +41,11 @@ class BillingRoutePayload(BaseModel):
     billing_region: str | None = None
     wants_total: bool = False
     wants_top: bool = False
+    needs_clarification: bool = False
+    clarification_question: str | None = None
+    clarification_options: list[str] | None = None
+    clarification_kind: str | None = None
+    missing_slots: list[str] | None = None
     time_scope: str | None = Field(
         default=None,
         description="explicit_window|month_to_date|full_history_to_date|unsure",
@@ -59,6 +64,11 @@ class ResolvedCostContext:
     billing_region: str | None
     wants_total: bool
     wants_top: bool
+    needs_clarification: bool
+    clarification_question: str | None
+    clarification_options: list[str]
+    clarification_kind: str | None
+    missing_slots: list[str]
 
 
 ROUTER_SCHEMA: dict[str, Any] = {
@@ -75,9 +85,21 @@ ROUTER_SCHEMA: dict[str, Any] = {
         "billing_region": {"type": "string"},
         "wants_total": {"type": "boolean"},
         "wants_top": {"type": "boolean"},
+        "needs_clarification": {"type": "boolean"},
+        "clarification_question": {"type": "string"},
+        "clarification_options": {"type": "array", "items": {"type": "string"}},
+        "clarification_kind": {"type": "string"},
+        "missing_slots": {"type": "array", "items": {"type": "string"}},
         "time_scope": {"type": "string"},
     },
-    "required": ["rewritten_question", "hint", "time_confident", "wants_total", "wants_top"],
+    "required": [
+        "rewritten_question",
+        "hint",
+        "time_confident",
+        "wants_total",
+        "wants_top",
+        "needs_clarification",
+    ],
 }
 
 
@@ -115,12 +137,20 @@ def _router_prompt(message: str, today: date) -> str:
         "- env: prod/dev/null\n"
         "- service, billing_project_id, billing_region (or null)\n"
         "- wants_total / wants_top booleans\n\n"
+        "Clarification rules:\n"
+        "- If required slots are missing, set needs_clarification=true.\n"
+        "- Fill clarification_question with one concise question.\n"
+        "- Fill clarification_options with 2-5 concrete options when useful.\n"
+        "- Fill clarification_kind with one of: time_window, compare_scope, compare_entities, top_n, schema_column, other.\n"
+        "- Fill missing_slots with required unresolved fields.\n"
+        "- If question is executable, set needs_clarification=false and leave clarification_* empty.\n\n"
         "Time rules:\n"
         "- For 'this month till now' => first day of this month to today.\n"
         "- For 'March and April combined, until now' (or similar multi-month-to-date phrasing), "
         "set window_start to first day of the first named month and window_end=today.\n"
         "- For a named full month like 'March 2026', return full calendar bounds (e.g. 2026-03-01..2026-03-31).\n"
         "- For 'last N days' => inclusive range ending today.\n"
+        "- For 'this year' => January 1st of current year through today.\n"
         "- For 'used till now' / 'until now' with no explicit month anchor, prefer full_history_to_date.\n"
         "- Set time_scope to one of: explicit_window, month_to_date, full_history_to_date, unsure.\n"
         "- If user is vague and cannot be resolved, set time_scope=unsure, time_confident=false and omit window fields.\n\n"
@@ -282,4 +312,11 @@ def resolve_cost_context(message: str, *, today: date) -> ResolvedCostContext:
         billing_region=(payload.billing_region or "").strip().lower() or None,
         wants_total=bool(payload.wants_total),
         wants_top=bool(payload.wants_top),
+        needs_clarification=bool(payload.needs_clarification),
+        clarification_question=(payload.clarification_question or "").strip() or None,
+        clarification_options=[
+            str(x).strip() for x in (payload.clarification_options or []) if str(x).strip()
+        ],
+        clarification_kind=(payload.clarification_kind or "").strip() or None,
+        missing_slots=[str(x).strip() for x in (payload.missing_slots or []) if str(x).strip()],
     )

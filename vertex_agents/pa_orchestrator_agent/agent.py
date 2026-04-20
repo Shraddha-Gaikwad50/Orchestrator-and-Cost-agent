@@ -16,6 +16,7 @@ import vertexai
 import vertexai.agent_engines as agent_engines
 
 logger = logging.getLogger(__name__)
+_SPECIALIST_SESSION_KEY = "cost_specialist_session_id"
 
 _ORCHESTRATOR_INSTRUCTION = """You are a routing orchestrator for GCP cost intelligence.
 - For any cost, billing, spend, service-cost, project-cost, region-cost, trend, or usage question: ALWAYS call query_cost_specialist first.
@@ -100,6 +101,14 @@ def _normalize_specialist_output(text: str) -> str:
         obj = json.loads(cleaned)
     except Exception:
         return cleaned
+    if isinstance(obj, dict) and obj.get("response_type") == "clarification":
+        q = str(obj.get("question") or "").strip()
+        options = obj.get("options")
+        if isinstance(options, list) and options:
+            opts = "\n".join(f"- {str(x).strip()}" for x in options if str(x).strip())
+            if opts:
+                return f"CLARIFICATION_REQUIRED:\n{q}\nOptions:\n{opts}".strip()
+        return f"CLARIFICATION_REQUIRED:\n{q}".strip()
     if isinstance(obj, dict) and obj.get("needs_clarification"):
         q = str(obj.get("question") or "").strip()
         options = obj.get("options")
@@ -152,11 +161,30 @@ def query_cost_specialist(question: str, tool_context: ToolContext | None = None
         engine = agent_engines.get(resource_name)
         # Keep specialist memory/user scope stable across turns for the same user.
         user_id = _specialist_user_id_from_context(tool_context)
-        session = engine.create_session(user_id=user_id)
-        session_id = session.get("id") if isinstance(session, dict) else None
-        events = list(
-            engine.stream_query(message=question, user_id=user_id, session_id=session_id)
-        )
+        session_id = None
+        if tool_context and isinstance(tool_context.state, dict):
+            sid = tool_context.state.get(_SPECIALIST_SESSION_KEY)
+            session_id = str(sid).strip() if sid else None
+        if not session_id:
+            session = engine.create_session(user_id=user_id)
+            session_id = session.get("id") if isinstance(session, dict) else None
+            if tool_context and isinstance(tool_context.state, dict) and session_id:
+                tool_context.state[_SPECIALIST_SESSION_KEY] = session_id
+        if not session_id:
+            raise RuntimeError("Specialist create_session returned no session id")
+        try:
+            events = list(
+                engine.stream_query(message=question, user_id=user_id, session_id=session_id)
+            )
+        except Exception:
+            # Session can expire/reset; recreate once and retry.
+            session = engine.create_session(user_id=user_id)
+            session_id = session.get("id") if isinstance(session, dict) else None
+            if tool_context and isinstance(tool_context.state, dict) and session_id:
+                tool_context.state[_SPECIALIST_SESSION_KEY] = session_id
+            events = list(
+                engine.stream_query(message=question, user_id=user_id, session_id=session_id)
+            )
         chunks: list[str] = []
         for ev in events:
             if isinstance(ev, dict) and ev.get("code"):

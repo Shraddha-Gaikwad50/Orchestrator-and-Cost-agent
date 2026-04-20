@@ -76,6 +76,9 @@ Evaluation + Memories tabs
 - Evaluation tab population:
   - Publish real eval runs through Vertex GenAI eval client:
     - scripts/agent-engine-create-eval.py --publish-to-vertex --gcs-dest gs://<bucket>/<path>
+  - Use `scripts/evals/agent_engine_eval_cases.json` for single-turn guardrails and
+    `scripts/evals/agent_engine_multiturn_cases.json` for clarification-flow regressions.
+  - Include time-interpretation cases such as "this year" in the single-turn pack.
   - Example:
     - ./.venv/bin/python scripts/agent-engine-create-eval.py \
       --resource projects/.../reasoningEngines/<ORCHESTRATOR_ID> \

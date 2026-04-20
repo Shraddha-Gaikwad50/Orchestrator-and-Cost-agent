@@ -15,6 +15,21 @@
     "must_contain_any": ["compare", "prod vs dev", "project", "service"]
   },
   {
+    "prompt": "Compare spend for Cloud SQL vs Vertex AI in the last 30 days.",
+    "expected_mode": "answer",
+    "must_not_contain_any": ["CLARIFICATION_REQUIRED", "What two scopes should I compare?"]
+  },
+  {
+    "prompt": "What did we spend on Cloud SQL in the last 7 days?",
+    "expected_mode": "answer",
+    "must_not_contain_any": ["CLARIFICATION_REQUIRED", "What time window should I use"]
+  },
+  {
+    "prompt": "What has been the total spend on Cloud SQL this year for jaybel-dev project?",
+    "expected_mode": "answer",
+    "must_not_contain_any": ["CLARIFICATION_REQUIRED", "What time window should I use"]
+  },
+  {
     "prompt": "List the top 3 most expensive services this month.",
     "expected_mode": "answer",
     "must_not_contain_any": ["I am not sure", "guess", "probably"]

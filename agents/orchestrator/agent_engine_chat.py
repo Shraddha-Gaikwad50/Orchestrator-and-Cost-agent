@@ -23,6 +23,7 @@ from intelligence import sse_pack_a2a
 import session_repository
 
 logger = logging.getLogger(__name__)
+_COST_PAYLOAD_MARKER = "COST_PAYLOAD_JSON:\n"
 
 _ORCHESTRATOR_RESOURCE = os.environ.get(
     "ORCHESTRATOR_AGENT_ENGINE_RESOURCE", ""
@@ -182,11 +183,15 @@ def _extract_structured_result_from_event(event: dict) -> str:
         snippet = _extract_first_json_snippet(payload_text)
         if not snippet:
             continue
-        return (
-            "Source: agent-engine specialist; source=bigquery; currency=INR\n\n"
-            "Result (amounts in INR ₹ where applicable):\n"
-            f"{snippet}"
-        )
+        try:
+            parsed = json.loads(snippet)
+        except Exception:
+            continue
+        if isinstance(parsed, dict) and parsed.get("response_type"):
+            return f"{_COST_PAYLOAD_MARKER}{json.dumps(parsed, ensure_ascii=False)}"
+        # Backward compatibility: old specialist payloads may be raw arrays/objects.
+        wrapped = {"response_type": "result", "data": parsed}
+        return f"{_COST_PAYLOAD_MARKER}{json.dumps(wrapped, ensure_ascii=False)}"
     return ""
 
 
