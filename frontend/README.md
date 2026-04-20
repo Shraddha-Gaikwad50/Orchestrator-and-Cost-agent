@@ -11,6 +11,7 @@ NEXT_PUBLIC_ORCHESTRATOR_URL=http://127.0.0.1:8000
 ```
 
 The UI always talks to this HTTP server. It does **not** call Vertex directly.
+The bridge emits typed cost payloads for rendering (`response_type=clarification|result|error`), so clarification prompts are kept as plain text and not rendered as result tables.
 
 ### Invoking Vertex AI Agent Engine on every message
 

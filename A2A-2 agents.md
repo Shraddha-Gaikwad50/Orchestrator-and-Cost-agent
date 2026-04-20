@@ -75,6 +75,7 @@ There is no local `/tasks/send` specialist path anymore.
   - guarded SQL generation (structured JSON)
   - strict SQL validation + dry-run bytes guard
   - clarification-first execution based on structured router decisions (LLM-first semantics, thin deterministic guardrails)
+  - typed response contract (`response_type=clarification|result|error`) propagated cost agent -> bridge -> frontend renderer
 - BigQuery schema introspection path:
   - list columns
   - check if column exists
