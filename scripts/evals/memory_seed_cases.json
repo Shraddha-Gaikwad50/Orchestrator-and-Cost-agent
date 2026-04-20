@@ -1,0 +1,20 @@
+[
+  {
+    "name": "cost_preference_memory",
+    "turns": [
+      "Remember this preference: I always prefer cost summaries grouped by project and service.",
+      "For future answers, default to top 5 services unless I ask otherwise.",
+      "Acknowledge these preferences in one sentence."
+    ],
+    "verify_query": "What are my preferences for cost summaries?"
+  },
+  {
+    "name": "schema_and_followup_memory",
+    "turns": [
+      "Remember this: my default schema focus column is project_name.",
+      "Remember this too: when I ask unique values, I usually mean project_name unless I specify a different column.",
+      "Confirm you stored my schema defaults."
+    ],
+    "verify_query": "What schema defaults did I share?"
+  }
+]

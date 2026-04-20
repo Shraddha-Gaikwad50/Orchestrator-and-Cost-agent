@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import json
+import logging
 
 from google.adk.agents import LlmAgent
+from google.adk.agents.context import Context
 from google.adk.tools import FunctionTool
+from google.adk.tools.preload_memory_tool import PreloadMemoryTool
 
 from . import db_logic
+
+logger = logging.getLogger(__name__)
 
 
 def query_cloud_costs(question: str) -> str:
@@ -38,6 +43,21 @@ def query_cloud_costs(question: str) -> str:
     return result
 
 
+async def _persist_turn_memory(callback_context: Context) -> None:
+    """
+    Persist high-signal turn context into Memory Bank after each response.
+    """
+    try:
+        events = getattr(callback_context.session, "events", None) or []
+        if isinstance(events, list) and events:
+            await callback_context.add_events_to_memory(events=events[-8:])
+        else:
+            await callback_context.add_session_to_memory()
+    except Exception:
+        logger.exception("Failed to persist cost agent memory")
+    return None
+
+
 root_agent = LlmAgent(
     name="cost_metrics_agent",
     model="gemini-2.5-flash",
@@ -52,5 +72,6 @@ root_agent = LlmAgent(
         "If the tool returns JSON with an \"error\" field, state that you cannot verify from current data, include detail/hint, and ask one actionable follow-up. "
         "Never expose internal chain-of-thought or fabricate fallback results."
     ),
-    tools=[FunctionTool(query_cloud_costs)],
+    tools=[PreloadMemoryTool(), FunctionTool(query_cloud_costs)],
+    after_agent_callback=_persist_turn_memory,
 )
