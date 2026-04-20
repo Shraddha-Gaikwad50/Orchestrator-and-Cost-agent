@@ -4,6 +4,7 @@
  */
 
 const RESULT_MARKER = "\n\nResult (amounts in INR ₹ where applicable):\n";
+const COST_PAYLOAD_MARKER = "COST_PAYLOAD_JSON:\n";
 
 /** Preferred column order; remaining keys sorted alphabetically. */
 const COLUMN_PRIORITY = [
@@ -36,6 +37,82 @@ export type ParsedCostMessage =
       footer: string;
     }
   | { kind: "plain"; text: string };
+
+function _formatClarification(question: string, options: string[]): string {
+  const cleanQuestion = question.trim();
+  const cleanOptions = options.map((o) => o.trim()).filter(Boolean);
+  if (!cleanOptions.length) return cleanQuestion;
+  return `${cleanQuestion}\nOptions:\n${cleanOptions.map((o) => `- ${o}`).join("\n")}`;
+}
+
+function parseStructuredCostPayload(raw: string): ParsedCostMessage | null {
+  const markerIdx = raw.indexOf(COST_PAYLOAD_MARKER);
+  if (markerIdx === -1) return null;
+  const jsonPart = raw.slice(markerIdx + COST_PAYLOAD_MARKER.length).trim();
+  const extracted = extractFirstJson(jsonPart);
+  if (!extracted || extracted.value === null || typeof extracted.value !== "object") {
+    return null;
+  }
+  const payload = extracted.value as Record<string, unknown>;
+  const responseType = String(payload.response_type ?? "").trim().toLowerCase();
+  if (responseType === "clarification") {
+    const question = String(payload.question ?? "Please clarify your request.");
+    const optionsRaw = payload.options;
+    const options = Array.isArray(optionsRaw)
+      ? optionsRaw.map((x) => String(x))
+      : [];
+    return { kind: "plain", text: _formatClarification(question, options) };
+  }
+  if (responseType === "error") {
+    const detail = String(payload.detail ?? "I cannot verify this from current data.");
+    const hint = String(payload.hint ?? "").trim();
+    return {
+      kind: "plain",
+      text: hint ? `${detail}\nHint: ${hint}` : detail,
+    };
+  }
+  if (responseType === "result") {
+    const data = payload.data;
+    if (Array.isArray(data)) {
+      const allObjects = data.every(
+        (x) => x !== null && typeof x === "object" && !Array.isArray(x)
+      );
+      if (!allObjects) {
+        return { kind: "plain", text: raw };
+      }
+      const rows = data.map((row) => normalizeRow(row as Record<string, unknown>));
+      const allKeys = new Set<string>();
+      for (const r of rows) {
+        Object.keys(r).forEach((k) => allKeys.add(k));
+      }
+      return {
+        kind: "table",
+        preamble: "Cost query results",
+        noteBeforeJson: "",
+        columns: deriveColumnOrder(Array.from(allKeys)),
+        rows,
+        footer: "",
+      };
+    }
+    if (data !== null && typeof data === "object") {
+      const obj = data as Record<string, unknown>;
+      const keys = deriveColumnOrder(Object.keys(obj));
+      const entries: [string, string][] = keys.map((k) => [
+        k,
+        obj[k] === null || obj[k] === undefined ? "" : String(obj[k]),
+      ]);
+      return {
+        kind: "kv",
+        preamble: "Cost query result details",
+        noteBeforeJson: "",
+        entries,
+        footer: "",
+      };
+    }
+    return { kind: "plain", text: raw };
+  }
+  return null;
+}
 
 function parseRankedCostList(raw: string): ParsedCostMessage | null {
   const lines = raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
@@ -75,6 +152,14 @@ function parseRankedCostList(raw: string): ParsedCostMessage | null {
 }
 
 function parseBulletServiceList(raw: string): ParsedCostMessage | null {
+  const rawLower = raw.toLowerCase();
+  if (
+    !rawLower.includes("service") ||
+    rawLower.includes("clarification_required") ||
+    rawLower.includes("options:")
+  ) {
+    return null;
+  }
   const lines = raw.split(/\r?\n/);
   const rows: Record<string, string>[] = [];
   for (const line of lines) {
@@ -96,6 +181,7 @@ function parseBulletServiceList(raw: string): ParsedCostMessage | null {
 
 function parseInlineServiceSentence(raw: string): ParsedCostMessage | null {
   const compact = raw.replace(/\s+/g, " ").trim();
+  if (/clarification_required|options:/i.test(compact)) return null;
   if (!/services?/i.test(compact) || !compact.includes(",")) return null;
   const colonIdx = compact.indexOf(":");
   if (colonIdx < 0 || colonIdx === compact.length - 1) return null;
@@ -202,6 +288,13 @@ function extractFirstJson(s: string): {
 }
 
 export function parseCostAssistantMessage(raw: string): ParsedCostMessage {
+  const structured = parseStructuredCostPayload(raw);
+  if (structured) return structured;
+
+  if (raw.includes("CLARIFICATION_REQUIRED:") || raw.includes("\nOptions:\n- ")) {
+    return { kind: "plain", text: raw };
+  }
+
   const idx = raw.indexOf(RESULT_MARKER);
   if (idx === -1) {
     const ranked = parseRankedCostList(raw);

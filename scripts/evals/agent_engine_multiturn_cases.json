@@ -1,0 +1,38 @@
+[
+  {
+    "turns": [
+      "What did we spend on Cloud SQL?",
+      "last 7 days"
+    ],
+    "expected_mode": "answer",
+    "must_not_contain_any": [
+      "CLARIFICATION_REQUIRED",
+      "What time window should I use"
+    ]
+  },
+  {
+    "turns": [
+      "Compare spend.",
+      "cloud sql vs vertex ai",
+      "last 30 days"
+    ],
+    "expected_mode": "answer",
+    "must_not_contain_any": [
+      "What two scopes should I compare?",
+      "CLARIFICATION_REQUIRED"
+    ]
+  },
+  {
+    "turns": [
+      "Compare spend.",
+      "service A vs service B",
+      "Cloud SQL vs Vertex AI",
+      "this month"
+    ],
+    "expected_mode": "answer",
+    "must_not_contain_any": [
+      "What two scopes should I compare?",
+      "For what time window would you like to compare"
+    ]
+  }
+]

@@ -942,6 +942,8 @@ def _query_bigquery_schema(question: str) -> str | None:
         return _clarification_payload(
             "Which column name do you want me to inspect?",
             [row["column_name"] for row in schema_rows[:10]],
+            clarification_kind="schema_column",
+            missing_slots=["column_name"],
         )
     field = lookup.get(column_name.lower())
 
@@ -983,19 +985,33 @@ def _query_bigquery_schema(question: str) -> str | None:
 
 
 def _error_payload(kind: str, detail: str, hint: str | None = None) -> str:
-    payload: dict[str, str] = {"error": kind, "detail": detail}
+    payload: dict[str, str] = {"response_type": "error", "error": kind, "detail": detail}
     if hint:
         payload["hint"] = hint
     return json.dumps(payload, indent=2)
 
 
-def _clarification_payload(question: str, options: list[str] | None = None) -> str:
+def _clarification_payload(
+    question: str,
+    options: list[str] | None = None,
+    *,
+    clarification_kind: str | None = None,
+    missing_slots: list[str] | None = None,
+    context: dict[str, Any] | None = None,
+) -> str:
     payload: dict[str, object] = {
+        "response_type": "clarification",
         "needs_clarification": True,
         "question": question.strip(),
     }
     if options:
         payload["options"] = [x.strip() for x in options if x and x.strip()]
+    if clarification_kind:
+        payload["clarification_kind"] = clarification_kind
+    if missing_slots:
+        payload["missing_slots"] = [x.strip() for x in missing_slots if x and x.strip()]
+    if context:
+        payload["context"] = context
     return json.dumps(payload, indent=2)
 
 
@@ -1032,24 +1048,88 @@ def _needs_time_window_clarification(question: str, filters: CostQueryFilters) -
     return False
 
 
+def _detect_compare_scope(question: str) -> str | None:
+    q = question.lower()
+    if "prod vs dev" in q or (
+        re.search(r"\b(prod|production|prd)\b", q)
+        and re.search(r"\b(dev|development)\b", q)
+    ):
+        return "env"
+    if "project" in q and "vs" in q:
+        return "project"
+    if "service" in q and "vs" in q:
+        return "service"
+    if re.search(r"\b(cloud sql|vertex ai|bigquery|cloud storage|cloud run|compute engine)\b", q) and "vs" in q:
+        return "service"
+    return None
+
+
+def _extract_vs_values(question: str) -> tuple[str, str] | None:
+    m = re.search(r"\b(.+?)\s+vs\.?\s+(.+)\b", question, re.I)
+    if not m:
+        return None
+    left = m.group(1).strip(" .,:;").strip()
+    right = m.group(2).strip(" .,:;").strip()
+    if not left or not right:
+        return None
+    return left, right
+
+
+def _has_explicit_time_window(question: str, filters: CostQueryFilters) -> bool:
+    if filters.has_period:
+        return True
+    q = question.lower()
+    return bool(
+        _mentions_till_now(question)
+        or re.search(r"\b(all\s*time|overall\s+to\s+date|full\s+history)\b", q)
+        or re.search(r"\blast\s+\d+\s+days?\b", q)
+        or "this month" in q
+        or "last month" in q
+        or "this week" in q
+        or "last week" in q
+    )
+
+
 def _clarification_if_ambiguous(question: str, filters: CostQueryFilters) -> str | None:
     q = question.lower()
     if filters.wants_top and _extract_top_n(question) is None:
         return _clarification_payload(
             "How many results should I return for 'most expensive'?",
             ["Top 3", "Top 5", "Top 10"],
+            clarification_kind="top_n",
+            missing_slots=["top_n"],
         )
-    if _needs_time_window_clarification(question, filters):
+    if re.search(r"\bcompare\b", q) or " vs " in q:
+        scope = _detect_compare_scope(question)
+        if scope is None:
+            return _clarification_payload(
+                "What two scopes should I compare?",
+                ["prod vs dev", "project A vs project B", "service A vs service B"],
+                clarification_kind="compare_scope",
+                missing_slots=["compare_scope"],
+            )
+        if scope == "service" and _extract_vs_values(question) is None:
+            return _clarification_payload(
+                "Which two services should I compare?",
+                ["Cloud SQL vs Vertex AI", "BigQuery vs Cloud Storage", "Cloud Run vs Compute Engine"],
+                clarification_kind="compare_entities",
+                missing_slots=["service_a", "service_b"],
+                context={"compare_scope": "service"},
+            )
+        if not _has_explicit_time_window(question, filters):
+            return _clarification_payload(
+                "For what time window should I compare spend?",
+                ["Last 7 days", "Last 30 days", "This month (month-to-date)", "Full history to date"],
+                clarification_kind="compare_time_window",
+                missing_slots=["time_window"],
+                context={"compare_scope": scope},
+            )
+    elif _needs_time_window_clarification(question, filters):
         return _clarification_payload(
             "What time window should I use for this cost query?",
             ["Last 7 days", "This month (month-to-date)", "Full history to date"],
-        )
-    if re.search(r"\bcompare\b", q) and not (
-        re.search(r"\b(prod|production|prd)\b", q) and re.search(r"\b(dev|development)\b", q)
-    ):
-        return _clarification_payload(
-            "What two scopes should I compare?",
-            ["prod vs dev", "project A vs project B", "service A vs service B"],
+            clarification_kind="time_window",
+            missing_slots=["time_window"],
         )
     return None
 
@@ -1083,6 +1163,16 @@ def query_cost_data(question: str) -> tuple[str, str]:
                 if llm_context_router_usable():
                     try:
                         routed = resolve_cost_context(question, today=date.today())
+                        if routed.needs_clarification:
+                            return (
+                                _clarification_payload(
+                                    routed.clarification_question or "Could you clarify your request?",
+                                    routed.clarification_options or None,
+                                    clarification_kind=routed.clarification_kind,
+                                    missing_slots=routed.missing_slots or None,
+                                ),
+                                "router_requested_clarification; source=bigquery; currency=INR",
+                            )
                         f = CostQueryFilters(
                             env=routed.env,
                             svc=routed.service,
@@ -1109,7 +1199,7 @@ def query_cost_data(question: str) -> tuple[str, str]:
             extra = hint if hint and hint != "no explicit filters" else ""
             if router_status != "router_ok":
                 extra = f"{extra}; {router_status}".strip("; ").strip()
-            wnote_full = f"{wnote} Parser hints: {extra}".strip() if extra else wnote
+            wnote_full = f"{wnote} Context hints: {extra}".strip() if extra else wnote
             try:
                 body, sh = run_llm_billing_query(
                     rewritten_question,
@@ -1153,11 +1243,6 @@ def query_costs(question: str) -> str:
                 str(e),
                 "Check BQ_BILLING_* and IAM; table/view metadata must be readable.",
             )
-
-    filters = parse_cost_query(question)
-    clarification = _clarification_if_ambiguous(question, filters)
-    if clarification:
-        return clarification
 
     try:
         body, _ = query_cost_data(question)

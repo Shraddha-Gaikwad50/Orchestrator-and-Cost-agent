@@ -74,6 +74,7 @@ There is no local `/tasks/send` specialist path anymore.
   - context routing (structured JSON)
   - guarded SQL generation (structured JSON)
   - strict SQL validation + dry-run bytes guard
+  - clarification-first execution based on structured router decisions (LLM-first semantics, thin deterministic guardrails)
 - BigQuery schema introspection path:
   - list columns
   - check if column exists
@@ -146,6 +147,7 @@ To ensure Agent Engine console tabs are populated with real data:
 - Evaluation publishing (Evaluation tab):
   - `scripts/agent-engine-create-eval.py`
   - Uses reusable eval prompts from `scripts/evals/agent_engine_eval_cases.json`.
+  - Supports multi-turn regression packs (for clarification chains) via `turns` arrays in case files, e.g. `scripts/evals/agent_engine_multiturn_cases.json`.
   - `--publish-to-vertex --gcs-dest gs://...` creates actual evaluation runs in Vertex.
   - Writes local baseline + run metadata to `logs/agent-engine-eval-*.json`.
 

@@ -45,6 +45,26 @@ def extract_text(event: dict) -> str:
     return "\n".join(out).strip()
 
 
+def case_turns(case: dict) -> list[str]:
+    turns = case.get("turns")
+    if isinstance(turns, list):
+        return [str(t).strip() for t in turns if str(t).strip()]
+    prompt = str(case.get("prompt") or "").strip()
+    return [prompt] if prompt else []
+
+
+def case_prompt_for_inference(case: dict) -> str:
+    turns = case_turns(case)
+    if not turns:
+        return ""
+    if len(turns) == 1:
+        return turns[0]
+    transcript = ["multi-turn conversation"]
+    for t in turns:
+        transcript.append(f"USER: {t}")
+    return "\n".join(transcript)
+
+
 def parse_labels(pairs: list[str]) -> dict[str, str]:
     labels: dict[str, str] = {}
     for pair in pairs:
@@ -79,7 +99,7 @@ def build_eval_dataset(cases: list[dict]) -> pd.DataFrame:
     prompts: list[str] = []
     session_inputs: list = []
     for case in cases:
-        prompt = str(case.get("prompt") or "").strip()
+        prompt = case_prompt_for_inference(case)
         if not prompt:
             continue
         prompts.append(prompt)
@@ -133,28 +153,35 @@ def main() -> None:
 
     rows: list[dict] = []
     for case in cases:
-        prompt = str(case.get("prompt") or "").strip()
-        if not prompt:
+        turns = case_turns(case)
+        if not turns:
             continue
         user_id = f"eval-{uuid.uuid4().hex[:8]}"
         sess = engine.create_session(user_id=user_id)
         session_id = sess.get("id")
         if not session_id:
             raise SystemExit("create_session failed for eval run")
-        chunks: list[str] = []
-        for ev in engine.stream_query(message=prompt, user_id=user_id, session_id=session_id):
-            text = extract_text(ev)
-            if text:
-                chunks.append(text)
+        turn_rows: list[dict] = []
+        final_response = ""
+        for turn in turns:
+            chunks: list[str] = []
+            for ev in engine.stream_query(message=turn, user_id=user_id, session_id=session_id):
+                text = extract_text(ev)
+                if text:
+                    chunks.append(text)
+            joined = "\n".join(chunks).strip()
+            final_response = joined or final_response
+            turn_rows.append({"prompt": turn, "response": joined})
         rows.append(
             {
-                "prompt": prompt,
+                "prompt": turns[-1],
+                "turns": turn_rows,
                 "expected_mode": case.get("expected_mode"),
                 "must_contain_any": case.get("must_contain_any", []),
                 "must_not_contain_any": case.get("must_not_contain_any", []),
                 "user_id": user_id,
                 "session_id": session_id,
-                "response": "\n".join(chunks).strip(),
+                "response": final_response,
             }
         )
 
