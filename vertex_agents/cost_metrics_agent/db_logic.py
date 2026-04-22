@@ -2,7 +2,8 @@
 
 Backends:
 - BigQuery Billing Export table (preferred when configured)
-- PostgreSQL cloud_costs table (fallback)
+- PostgreSQL `cloud_costs` table (deprecated: only used as a last-resort fallback
+  in ``auto`` mode when BigQuery is unavailable, or when ``COST_DATA_SOURCE=postgres``)
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ from typing import Any
 from google.cloud import bigquery
 import psycopg
 
-from .billing_context_router import llm_context_router_usable, resolve_cost_context
+from .billing_context_router import ResolvedCostContext, llm_context_router_usable, resolve_cost_context
 from .billing_llm_sql import (
     google_ai_configured,
     llm_sql_usable,
@@ -850,32 +851,45 @@ def _extract_requested_column_name(question: str, schema_rows: list[dict[str, st
     return None
 
 
+def _as_words(s: str) -> list[str]:
+    out: list[str] = []
+    for t in s.split():
+        t = t.strip(".,?!;:\"'()[]`")
+        if t:
+            out.append(t.lower())
+    return out
+
+
 def _is_schema_list_query(question: str) -> bool:
-    q = question.lower()
+    """BigQuery schema routing (no ``re``; keep regex out of this hot path)."""
+    q = " ".join(question.lower().split())
+    words = _as_words(q)
     return bool(
-        re.search(r"\bwhat\s+are\s+all\s+the\s+column\s+names\b", q)
-        or re.search(r"\blist\s+all\s+(?:the\s+)?column\s+names\b", q)
-        or re.search(r"\bwhat\s+columns\s+(?:exist|are available)\b", q)
-        or re.search(r"\bshow\s+(?:me\s+)?(?:all\s+)?columns\b", q)
-        or re.search(r"\bschema\b", q)
+        ("what are all" in q and "column" in q and "names" in q)
+        or ("list all" in q and "column" in q and "names" in q)
+        or ("what columns" in q and ("exist" in q or "available" in q))
+        or ("show" in q and "columns" in q)
+        or ("schema" in words)
     )
 
 
 def _is_column_existence_query(question: str) -> bool:
-    q = question.lower()
-    return bool(
-        re.search(r"\bdoes\s+.+\s+exist\b", q)
-        or re.search(r"\bis\s+.+\s+(?:a\s+)?column\b", q)
-        or re.search(r"\bwhich\s+column\b", q)
-    )
+    q = " ".join(question.lower().split())
+    if "which column" in q:
+        return True
+    if "does" in q and " exist" in q:
+        return True
+    if " is " in q and " column" in q:
+        return True
+    return False
 
 
 def _is_distinct_value_query(question: str) -> bool:
-    q = question.lower()
-    return bool(
-        re.search(r"\b(unique|distinct)\s+values?\b", q)
-        and re.search(r"\b(column|columns|field|fields|attribute)\b", q)
-    )
+    q = " ".join(question.lower().split())
+    has_distinct = "unique" in q or "distinct" in q
+    has_value = "value" in q or "values" in q
+    has_field = any(x in q for x in ("column", "columns", "field", "fields", "attribute"))
+    return has_distinct and has_value and has_field
 
 
 def _schema_field_lookup(schema_rows: list[dict[str, str]]) -> dict[str, dict[str, str]]:
@@ -962,7 +976,8 @@ def _query_bigquery_schema(question: str) -> str | None:
             )
         return _error_payload(
             "unknown_column",
-            f"The column `{column_name}` does not exist in `{BQ_BILLING_TABLE}`.",
+            f"The column `{column_name}` does not exist in `{BQ_BILLING_TABLE}`; "
+            f"cannot verify existence or list values for unknown columns.",
             "Ask for the full column list to inspect the live BigQuery schema.",
         )
 
@@ -970,7 +985,8 @@ def _query_bigquery_schema(question: str) -> str | None:
         if not field:
             return _error_payload(
                 "unknown_column",
-                f"The column `{column_name}` does not exist in `{BQ_BILLING_TABLE}`.",
+                f"The column `{column_name}` does not exist in `{BQ_BILLING_TABLE}`; "
+                f"cannot verify existence or list values for unknown columns.",
                 "Ask for the full column list to inspect the live BigQuery schema.",
             )
         if "." in field["column_name"] or not _is_supported_distinct_type(field["type"]):
@@ -1015,123 +1031,50 @@ def _clarification_payload(
     return json.dumps(payload, indent=2)
 
 
-def _extract_top_n(question: str) -> int | None:
-    m = re.search(r"\btop\s+(\d{1,2})\b", question, re.I)
-    if m:
-        try:
-            return max(1, min(50, int(m.group(1))))
-        except ValueError:
-            return None
-    m2 = re.search(r"\b(\d{1,2})\s+most\s+expensive\b", question, re.I)
-    if m2:
-        try:
-            return max(1, min(50, int(m2.group(1))))
-        except ValueError:
-            return None
-    return None
-
-
-def _needs_time_window_clarification(question: str, filters: CostQueryFilters) -> bool:
-    if filters.has_period:
-        return False
-    q = question.lower()
-    if re.search(r"\b(all\s*time|overall\s+to\s+date|full\s+history)\b", q):
-        return False
-    if _mentions_till_now(question):
-        return False
-    if re.search(r"\b(top|highest|largest|biggest|most\s+expensive)\b", q):
-        return True
-    if re.search(r"\b(total|sum|spend|cost)\b", q):
-        return True
-    if re.search(r"\b(list|unique|distinct)\b", q) and re.search(r"\bservice", q):
-        return True
-    return False
-
-
-def _detect_compare_scope(question: str) -> str | None:
-    q = question.lower()
-    if "prod vs dev" in q or (
-        re.search(r"\b(prod|production|prd)\b", q)
-        and re.search(r"\b(dev|development)\b", q)
-    ):
-        return "env"
-    if "project" in q and "vs" in q:
-        return "project"
-    if "service" in q and "vs" in q:
-        return "service"
-    if re.search(r"\b(cloud sql|vertex ai|bigquery|cloud storage|cloud run|compute engine)\b", q) and "vs" in q:
-        return "service"
-    return None
-
-
-def _extract_vs_values(question: str) -> tuple[str, str] | None:
-    m = re.search(r"\b(.+?)\s+vs\.?\s+(.+)\b", question, re.I)
-    if not m:
+def _clarification_from_router_slots(routed: ResolvedCostContext) -> str | None:
+    if not routed.needs_clarification:
         return None
-    left = m.group(1).strip(" .,:;").strip()
-    right = m.group(2).strip(" .,:;").strip()
-    if not left or not right:
-        return None
-    return left, right
+    kind = (routed.clarification_kind or "").strip() or None
+    missing = [str(x).strip() for x in (routed.missing_slots or []) if str(x).strip()]
+    priority = (routed.clarification_priority or "").strip().lower() if routed.clarification_priority else ""
+    if not kind:
+        if priority == "top_n":
+            kind = "top_n"
+        elif priority == "compare_scope":
+            kind = "compare_scope"
+        elif priority == "compare_entities":
+            kind = "compare_entities"
+        elif priority == "column_name":
+            kind = "schema_column"
+        else:
+            kind = "time_window"
 
+    question = (routed.clarification_question or "").strip()
+    options = [str(x).strip() for x in routed.clarification_options if str(x).strip()]
 
-def _has_explicit_time_window(question: str, filters: CostQueryFilters) -> bool:
-    if filters.has_period:
-        return True
-    q = question.lower()
-    return bool(
-        _mentions_till_now(question)
-        or re.search(r"\b(all\s*time|overall\s+to\s+date|full\s+history)\b", q)
-        or re.search(r"\blast\s+\d+\s+days?\b", q)
-        or "this month" in q
-        or "last month" in q
-        or "this week" in q
-        or "last week" in q
+    if not question:
+        if kind == "top_n":
+            question = "How many results should I return for 'most expensive'?"
+            options = ["Top 3", "Top 5", "Top 10"]
+        elif kind == "compare_scope":
+            question = "What two scopes should I compare?"
+            options = ["prod vs dev", "project A vs project B", "service A vs service B"]
+        elif kind == "compare_entities":
+            question = "Which two services should I compare?"
+            options = ["Cloud SQL vs Vertex AI", "BigQuery vs Cloud Storage", "Cloud Run vs Compute Engine"]
+        elif kind == "schema_column":
+            question = "Which column should I use?"
+            options = []
+        else:
+            question = "What time window should I use for this cost query?"
+            options = ["Last 7 days", "This month (month-to-date)", "Full history to date"]
+
+    return _clarification_payload(
+        question,
+        options or None,
+        clarification_kind=kind,
+        missing_slots=missing or None,
     )
-
-
-def _clarification_if_ambiguous(question: str, filters: CostQueryFilters) -> str | None:
-    q = question.lower()
-    if filters.wants_top and _extract_top_n(question) is None:
-        return _clarification_payload(
-            "How many results should I return for 'most expensive'?",
-            ["Top 3", "Top 5", "Top 10"],
-            clarification_kind="top_n",
-            missing_slots=["top_n"],
-        )
-    if re.search(r"\bcompare\b", q) or " vs " in q:
-        scope = _detect_compare_scope(question)
-        if scope is None:
-            return _clarification_payload(
-                "What two scopes should I compare?",
-                ["prod vs dev", "project A vs project B", "service A vs service B"],
-                clarification_kind="compare_scope",
-                missing_slots=["compare_scope"],
-            )
-        if scope == "service" and _extract_vs_values(question) is None:
-            return _clarification_payload(
-                "Which two services should I compare?",
-                ["Cloud SQL vs Vertex AI", "BigQuery vs Cloud Storage", "Cloud Run vs Compute Engine"],
-                clarification_kind="compare_entities",
-                missing_slots=["service_a", "service_b"],
-                context={"compare_scope": "service"},
-            )
-        if not _has_explicit_time_window(question, filters):
-            return _clarification_payload(
-                "For what time window should I compare spend?",
-                ["Last 7 days", "Last 30 days", "This month (month-to-date)", "Full history to date"],
-                clarification_kind="compare_time_window",
-                missing_slots=["time_window"],
-                context={"compare_scope": scope},
-            )
-    elif _needs_time_window_clarification(question, filters):
-        return _clarification_payload(
-            "What time window should I use for this cost query?",
-            ["Last 7 days", "This month (month-to-date)", "Full history to date"],
-            clarification_kind="time_window",
-            missing_slots=["time_window"],
-        )
-    return None
 
 
 def query_cost_data(question: str) -> tuple[str, str]:
@@ -1163,14 +1106,10 @@ def query_cost_data(question: str) -> tuple[str, str]:
                 if llm_context_router_usable():
                     try:
                         routed = resolve_cost_context(question, today=date.today())
-                        if routed.needs_clarification:
+                        clarification = _clarification_from_router_slots(routed)
+                        if clarification is not None:
                             return (
-                                _clarification_payload(
-                                    routed.clarification_question or "Could you clarify your request?",
-                                    routed.clarification_options or None,
-                                    clarification_kind=routed.clarification_kind,
-                                    missing_slots=routed.missing_slots or None,
-                                ),
+                                clarification,
                                 "router_requested_clarification; source=bigquery; currency=INR",
                             )
                         f = CostQueryFilters(
@@ -1228,7 +1167,7 @@ def query_cost_data(question: str) -> tuple[str, str]:
 
     sql, _ = nl_to_sql(question)
     params = params_for_sql(sql, question)
-    return run_query(sql, params), f"{hint}; source=postgres"
+    return run_query(sql, params), f"{hint}; source=postgres (deprecated fallback)"
 
 
 def query_costs(question: str) -> str:

@@ -78,16 +78,32 @@ Evaluation + Memories tabs
     - scripts/agent-engine-create-eval.py --publish-to-vertex --gcs-dest gs://<bucket>/<path>
   - Use `scripts/evals/agent_engine_eval_cases.json` for single-turn guardrails and
     `scripts/evals/agent_engine_multiturn_cases.json` for clarification-flow regressions.
+  - Clarification and error paths use the typed `COST_PAYLOAD_JSON:` line prefix; the
+    eval harness matches `must_contain_any` / `must_not` against both final text and
+    parsed JSON fields. Optional: `--turn-timeout-seconds` and `--turn-retries` for
+    long orchestrator runs. Postgres (`DATABASE_URL`) is a **deprecated** fallback
+    in `COST_DATA_SOURCE=auto` when BigQuery is unavailable; prefer BQ in production.
+  - Versioned golden baseline exists at:
+    - `scripts/evals/golden_dataset_v1.json`
+    - `scripts/evals/golden_dataset_schema.json`
+    - `scripts/evals/golden_dataset_readme.md`
+  - Enforce deterministic quality gates:
+    - `--fail-on-assertion`
+    - `--fail-on-priority P0`
+    - `--min-pass-rate 0.90` (seeding baseline) or `0.95` (release gate)
   - Include time-interpretation cases such as "this year" in the single-turn pack.
   - Example:
     - ./.venv/bin/python scripts/agent-engine-create-eval.py \
       --resource projects/.../reasoningEngines/<ORCHESTRATOR_ID> \
       --cases scripts/evals/agent_engine_eval_cases.json \
+      --fail-on-assertion \
+      --fail-on-priority P0 \
+      --min-pass-rate 0.95 \
       --publish-to-vertex \
       --gcs-dest gs://<bucket>/agent-engine-evals \
       --display-name orchestrator-guardrail-eval
 
-- One-command helper for both tabs (memory seeding + two eval runs):
+- One-command helper for both tabs (memory seeding + four eval runs: single-turn + multi-turn for each agent):
   - scripts/seed-agent-engine-observability.sh (macOS/Linux)
   - scripts/seed-agent-engine-observability.ps1 (Windows)
   - Prereqs:

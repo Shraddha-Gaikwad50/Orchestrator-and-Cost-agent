@@ -1,4 +1,4 @@
-﻿**System Architecture & Implementation Guide: Cost Intelligence Stack (Current)**
+**System Architecture & Implementation Guide: Cost Intelligence Stack (Current)**
 
 ## 1) Executive Summary
 
@@ -105,6 +105,12 @@ Configured source:
 - Schema query safety:
   - unknown column -> explicit error
   - unsupported nested distinct queries -> explicit guidance
+- Typed handoff: when the cost tool must return clarification or error JSON, the agent
+  emits a single `COST_PAYLOAD_JSON:`-prefixed block (and the orchestrator passes it
+  through unchanged). The local eval script parses that prefix and applies
+  `must_contain_any` to both the raw text and JSON string fields. Local Postgres
+  (`DATABASE_URL` / `COST_DATA_SOURCE` fallback) remains supported but is
+  **deprecated** for production; prefer BigQuery.
 
 ## 8) Key Environment Flags
 
@@ -149,12 +155,26 @@ To ensure Agent Engine console tabs are populated with real data:
   - `scripts/agent-engine-create-eval.py`
   - Uses reusable eval prompts from `scripts/evals/agent_engine_eval_cases.json`.
   - Supports multi-turn regression packs (for clarification chains) via `turns` arrays in case files, e.g. `scripts/evals/agent_engine_multiturn_cases.json`.
+  - Golden dataset baseline is versioned in:
+    - `scripts/evals/golden_dataset_v1.json`
+    - `scripts/evals/golden_dataset_schema.json`
+    - `scripts/evals/golden_dataset_readme.md`
+  - Performs deterministic scoring per case:
+    - `expected_mode` checks (`clarify|answer|error`)
+    - optional typed checks via `expected_response_type`
+    - `must_contain_any` and `must_not_contain_any` checks (text plus structured fields when `COST_PAYLOAD_JSON:` is present)
+  - Optional `--turn-timeout-seconds` and `--turn-retries` to stabilize long single-turn runs against the orchestrator
+  - Supports strict failure gates:
+    - `--fail-on-assertion`
+    - `--fail-on-priority P0`
+    - `--min-pass-rate <0..1>`
   - `--publish-to-vertex --gcs-dest gs://...` creates actual evaluation runs in Vertex.
   - Writes local baseline + run metadata to `logs/agent-engine-eval-*.json`.
 
 - One-command orchestration:
   - macOS/Linux: `scripts/seed-agent-engine-observability.sh`
   - Windows: `scripts/seed-agent-engine-observability.ps1`
+  - Runs memory seeding plus four eval suites (orchestrator/cost x single/multi turn) with release-style thresholds.
   - Required env vars:
     - `ORCHESTRATOR_AGENT_ENGINE_RESOURCE`
     - `COST_AGENT_ENGINE_RESOURCE`

@@ -47,23 +47,67 @@ $timestamp = (Get-Date).ToUniversalTime().ToString("yyyyMMddTHHmmssZ")
   --location $location `
   --resource $orchestratorResource `
   --cases "scripts/evals/agent_engine_eval_cases.json" `
+  --fail-on-assertion `
+  --min-pass-rate 0.90 `
+  --fail-on-priority P0 `
   --publish-to-vertex `
   --gcs-dest $EvalGcsDest `
-  --display-name "orchestrator-eval-$timestamp" `
+  --display-name "orchestrator-eval-single-$timestamp" `
   --label "component=orchestrator" `
+  --label "suite=single_turn" `
+  --label "dataset_version=v1" `
   --label "run_source=seed-agent-engine-observability" `
-  --out "logs/agent-engine-eval-orchestrator-$timestamp.json"
+  --out "logs/agent-engine-eval-orchestrator-single-$timestamp.json"
+
+& ".\.venv\Scripts\python.exe" "scripts/agent-engine-create-eval.py" `
+  --project $project `
+  --location $location `
+  --resource $orchestratorResource `
+  --cases "scripts/evals/agent_engine_multiturn_cases.json" `
+  --fail-on-assertion `
+  --min-pass-rate 0.90 `
+  --fail-on-priority P0 `
+  --publish-to-vertex `
+  --gcs-dest $EvalGcsDest `
+  --display-name "orchestrator-eval-multiturn-$timestamp" `
+  --label "component=orchestrator" `
+  --label "suite=multi_turn" `
+  --label "dataset_version=v1" `
+  --label "run_source=seed-agent-engine-observability" `
+  --out "logs/agent-engine-eval-orchestrator-multiturn-$timestamp.json"
 
 & ".\.venv\Scripts\python.exe" "scripts/agent-engine-create-eval.py" `
   --project $project `
   --location $location `
   --resource $CostAgentResource `
   --cases "scripts/evals/agent_engine_eval_cases.json" `
+  --fail-on-assertion `
+  --min-pass-rate 0.90 `
+  --fail-on-priority P0 `
   --publish-to-vertex `
   --gcs-dest $EvalGcsDest `
-  --display-name "cost-agent-eval-$timestamp" `
+  --display-name "cost-agent-eval-single-$timestamp" `
   --label "component=cost_agent" `
+  --label "suite=single_turn" `
+  --label "dataset_version=v1" `
   --label "run_source=seed-agent-engine-observability" `
-  --out "logs/agent-engine-eval-cost-$timestamp.json"
+  --out "logs/agent-engine-eval-cost-single-$timestamp.json"
+
+& ".\.venv\Scripts\python.exe" "scripts/agent-engine-create-eval.py" `
+  --project $project `
+  --location $location `
+  --resource $CostAgentResource `
+  --cases "scripts/evals/agent_engine_multiturn_cases.json" `
+  --fail-on-assertion `
+  --min-pass-rate 0.90 `
+  --fail-on-priority P0 `
+  --publish-to-vertex `
+  --gcs-dest $EvalGcsDest `
+  --display-name "cost-agent-eval-multiturn-$timestamp" `
+  --label "component=cost_agent" `
+  --label "suite=multi_turn" `
+  --label "dataset_version=v1" `
+  --label "run_source=seed-agent-engine-observability" `
+  --out "logs/agent-engine-eval-cost-multiturn-$timestamp.json"
 
 Write-Host "Observability seeding complete."

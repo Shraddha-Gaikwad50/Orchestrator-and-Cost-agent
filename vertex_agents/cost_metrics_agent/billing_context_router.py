@@ -41,6 +41,10 @@ class BillingRoutePayload(BaseModel):
     billing_region: str | None = None
     wants_total: bool = False
     wants_top: bool = False
+    intent_type: str | None = None
+    required_slots: list[str] | None = None
+    resolved_slots: dict[str, Any] | None = None
+    clarification_priority: str | None = None
     needs_clarification: bool = False
     clarification_question: str | None = None
     clarification_options: list[str] | None = None
@@ -56,8 +60,8 @@ class BillingRoutePayload(BaseModel):
 class ResolvedCostContext:
     rewritten_question: str
     hint: str
-    window_start: date
-    window_end: date
+    window_start: date | None
+    window_end: date | None
     env: str | None
     service: str | None
     billing_project_id: str | None
@@ -69,6 +73,10 @@ class ResolvedCostContext:
     clarification_options: list[str]
     clarification_kind: str | None
     missing_slots: list[str]
+    intent_type: str | None
+    required_slots: list[str]
+    resolved_slots: dict[str, Any]
+    clarification_priority: str | None
 
 
 ROUTER_SCHEMA: dict[str, Any] = {
@@ -85,6 +93,10 @@ ROUTER_SCHEMA: dict[str, Any] = {
         "billing_region": {"type": "string"},
         "wants_total": {"type": "boolean"},
         "wants_top": {"type": "boolean"},
+        "intent_type": {"type": "string"},
+        "required_slots": {"type": "array", "items": {"type": "string"}},
+        "resolved_slots": {"type": "object"},
+        "clarification_priority": {"type": "string"},
         "needs_clarification": {"type": "boolean"},
         "clarification_question": {"type": "string"},
         "clarification_options": {"type": "array", "items": {"type": "string"}},
@@ -137,6 +149,11 @@ def _router_prompt(message: str, today: date) -> str:
         "- env: prod/dev/null\n"
         "- service, billing_project_id, billing_region (or null)\n"
         "- wants_total / wants_top booleans\n\n"
+        "LLM-first slot contract:\n"
+        "- Set intent_type to one of: cost_total, top_n_ranking, compare, schema, discovery, other.\n"
+        "- Set required_slots to unresolved requirements among: time_window, top_n, compare_scope, compare_entities, column_name.\n"
+        "- Set resolved_slots as an object with any known slot values (example keys: time_window, top_n, compare_scope, service_a, service_b, column_name).\n"
+        "- Set clarification_priority to exactly one unresolved slot when clarification is needed.\n\n"
         "Clarification rules:\n"
         "- If required slots are missing, set needs_clarification=true.\n"
         "- Fill clarification_question with one concise question.\n"
@@ -144,6 +161,10 @@ def _router_prompt(message: str, today: date) -> str:
         "- Fill clarification_kind with one of: time_window, compare_scope, compare_entities, top_n, schema_column, other.\n"
         "- Fill missing_slots with required unresolved fields.\n"
         "- If question is executable, set needs_clarification=false and leave clarification_* empty.\n\n"
+        "Priority rules:\n"
+        "- For ranking asks like 'most expensive services', ask for top_n first if missing.\n"
+        "- For compare asks, ask compare_scope -> compare_entities -> time_window (one at a time).\n"
+        "- For cost_total asks without an explicit time window, ask for time_window instead of guessing.\n\n"
         "Time rules:\n"
         "- For 'this month till now' => first day of this month to today.\n"
         "- For 'March and April combined, until now' (or similar multi-month-to-date phrasing), "
@@ -200,6 +221,83 @@ def _parse_json(raw: str) -> BillingRoutePayload:
         raise RuntimeError("Router returned empty response")
     data = json.loads(text)
     return BillingRoutePayload.model_validate(data)
+
+
+def _slot_list(value: list[str] | None) -> list[str]:
+    return [str(v).strip() for v in (value or []) if str(v).strip()]
+
+
+def _normalized_intent(payload: BillingRoutePayload, message: str) -> str:
+    intent = (payload.intent_type or "").strip().lower()
+    if intent:
+        return intent
+    text = (payload.rewritten_question or message).lower()
+    if payload.wants_top:
+        return "top_n_ranking"
+    if "compare" in text or " vs " in text:
+        return "compare"
+    if payload.wants_total:
+        return "cost_total"
+    return "other"
+
+
+def _missing_required_slots(
+    required_slots: list[str],
+    resolved_slots: dict[str, Any],
+    *,
+    window_resolved: bool,
+) -> list[str]:
+    missing: list[str] = []
+    for slot in required_slots:
+        if slot == "time_window":
+            if not window_resolved and not str(resolved_slots.get("time_window") or "").strip():
+                missing.append(slot)
+            continue
+        if slot == "compare_entities":
+            service_a = str(resolved_slots.get("service_a") or "").strip()
+            service_b = str(resolved_slots.get("service_b") or "").strip()
+            if not service_a or not service_b:
+                missing.append(slot)
+            continue
+        value = resolved_slots.get(slot)
+        if isinstance(value, str):
+            if not value.strip():
+                missing.append(slot)
+        elif value is None:
+            missing.append(slot)
+    return missing
+
+
+def _clarification_for_slot(slot: str) -> tuple[str, list[str], str]:
+    if slot == "top_n":
+        return (
+            "How many results should I return for 'most expensive'?",
+            ["Top 3", "Top 5", "Top 10"],
+            "top_n",
+        )
+    if slot == "compare_scope":
+        return (
+            "What two scopes should I compare?",
+            ["prod vs dev", "project A vs project B", "service A vs service B"],
+            "compare_scope",
+        )
+    if slot == "compare_entities":
+        return (
+            "Which two services should I compare?",
+            ["Cloud SQL vs Vertex AI", "BigQuery vs Cloud Storage", "Cloud Run vs Compute Engine"],
+            "compare_entities",
+        )
+    if slot == "column_name":
+        return (
+            "Which column should I use?",
+            [],
+            "schema_column",
+        )
+    return (
+        "What time window should I use for this cost query?",
+        ["Last 7 days", "This month (month-to-date)", "Full history to date"],
+        "time_window",
+    )
 
 
 def _invoke_vertex(prompt: str) -> BillingRoutePayload:
@@ -272,32 +370,65 @@ def resolve_cost_context(message: str, *, today: date) -> ResolvedCostContext:
     text = payload.rewritten_question or message
     ws: date | None = None
     we: date | None = None
+    window_from_payload = False
     if payload.window_start and payload.window_end:
         try:
             ws = date.fromisoformat(payload.window_start.strip())
             we = date.fromisoformat(payload.window_end.strip())
+            window_from_payload = ws is not None and we is not None
         except ValueError:
             ws = None
             we = None
-    if ws is not None and we is not None:
-        hint = raw_hint
-    elif scope in {"month_to_date", "mtd"} or "this month" in text.lower():
-        ws = date(today.year, today.month, 1)
-        we = today
-        hint = raw_hint + "; defaulted to this month (month-to-date)"
-    elif scope == "full_history_to_date" or _mentions_till_now(text) or _looks_discovery_query(text):
-        ws = _full_history_start(today)
-        we = today
-        hint = raw_hint + f"; defaulted to full history-to-date ({ws} to {we})"
-    else:
-        if _default_till_now_scope() == "month_to_date":
+    intent = _normalized_intent(payload, message)
+    required_slots = _slot_list(payload.required_slots)
+    resolved_slots = payload.resolved_slots if isinstance(payload.resolved_slots, dict) else {}
+    if not required_slots:
+        if intent == "top_n_ranking":
+            required_slots = ["top_n", "time_window"]
+        elif intent == "compare":
+            required_slots = ["compare_scope", "compare_entities", "time_window"]
+        elif intent == "cost_total":
+            required_slots = ["time_window"]
+    has_time_scope = scope in {"month_to_date", "mtd", "full_history_to_date"}
+    resolved_time_window = str(resolved_slots.get("time_window") or "").strip()
+    window_resolved = window_from_payload or has_time_scope or bool(resolved_time_window)
+    missing_slots = _slot_list(payload.missing_slots)
+    if not missing_slots:
+        missing_slots = _missing_required_slots(required_slots, resolved_slots, window_resolved=window_resolved)
+    needs_clarification = bool(payload.needs_clarification) or bool(missing_slots)
+    clarification_priority = (payload.clarification_priority or "").strip().lower() or None
+    if needs_clarification and not clarification_priority:
+        clarification_priority = missing_slots[0] if missing_slots else None
+    clarification_question = (payload.clarification_question or "").strip() or None
+    clarification_options = [str(x).strip() for x in (payload.clarification_options or []) if str(x).strip()]
+    clarification_kind = (payload.clarification_kind or "").strip() or None
+    if needs_clarification and clarification_priority and not clarification_question:
+        clarification_question, clarification_options, clarification_kind = _clarification_for_slot(clarification_priority)
+    if needs_clarification and clarification_priority and not clarification_kind:
+        _, _, clarification_kind = _clarification_for_slot(clarification_priority)
+    if not needs_clarification:
+        if ws is not None and we is not None:
+            hint = raw_hint
+        elif scope in {"month_to_date", "mtd"} or "this month" in text.lower():
             ws = date(today.year, today.month, 1)
             we = today
             hint = raw_hint + "; defaulted to this month (month-to-date)"
-        else:
+        elif scope == "full_history_to_date" or _mentions_till_now(text) or _looks_discovery_query(text):
             ws = _full_history_start(today)
             we = today
             hint = raw_hint + f"; defaulted to full history-to-date ({ws} to {we})"
+        else:
+            if _default_till_now_scope() == "month_to_date":
+                ws = date(today.year, today.month, 1)
+                we = today
+                hint = raw_hint + "; defaulted to this month (month-to-date)"
+            else:
+                ws = _full_history_start(today)
+                we = today
+                hint = raw_hint + f"; defaulted to full history-to-date ({ws} to {we})"
+    else:
+        hint = raw_hint
+
     env = payload.env.strip().lower() if payload.env else None
     if env not in {"prod", "dev"}:
         env = None
@@ -312,11 +443,13 @@ def resolve_cost_context(message: str, *, today: date) -> ResolvedCostContext:
         billing_region=(payload.billing_region or "").strip().lower() or None,
         wants_total=bool(payload.wants_total),
         wants_top=bool(payload.wants_top),
-        needs_clarification=bool(payload.needs_clarification),
-        clarification_question=(payload.clarification_question or "").strip() or None,
-        clarification_options=[
-            str(x).strip() for x in (payload.clarification_options or []) if str(x).strip()
-        ],
-        clarification_kind=(payload.clarification_kind or "").strip() or None,
-        missing_slots=[str(x).strip() for x in (payload.missing_slots or []) if str(x).strip()],
+        needs_clarification=needs_clarification,
+        clarification_question=clarification_question,
+        clarification_options=clarification_options,
+        clarification_kind=clarification_kind,
+        missing_slots=missing_slots,
+        intent_type=intent,
+        required_slots=required_slots,
+        resolved_slots=resolved_slots,
+        clarification_priority=clarification_priority,
     )

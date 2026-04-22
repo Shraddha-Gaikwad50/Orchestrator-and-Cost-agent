@@ -1,0 +1,26 @@
+[
+  {
+    "id": "smoke.clarify.top_n",
+    "category": "clarification",
+    "priority": "P0",
+    "prompt": "What are the most expensive services?",
+    "expected_mode": "clarify",
+    "expected_response_type": "clarification"
+  },
+  {
+    "id": "smoke.clarify.time_window",
+    "category": "clarification",
+    "priority": "P0",
+    "prompt": "What did we spend on Cloud SQL?",
+    "expected_mode": "clarify",
+    "expected_response_type": "clarification"
+  },
+  {
+    "id": "smoke.error.unknown_column",
+    "category": "schema",
+    "priority": "P1",
+    "prompt": "List all unique values in the fake_column_xyz column.",
+    "expected_mode": "error",
+    "expected_response_type": "error"
+  }
+]
