@@ -4,13 +4,18 @@ This UI streams assistant responses from the orchestrator SSE endpoint.
 
 ## Environment
 
-Create `frontend/.env.local`:
+For local development, the UI always talks to the local orchestrator bridge at
+`http://127.0.0.1:8000`. It does **not** call Vertex directly from the browser.
+
+- If you use the full-stack launcher (`scripts/start-all.sh` on macOS/Linux),
+  it auto-generates `frontend/.env.development.local` with the correct values.
+- If you run frontend manually, create `frontend/.env.local` with:
 
 ```bash
 NEXT_PUBLIC_ORCHESTRATOR_URL=http://127.0.0.1:8000
+NEXT_PUBLIC_USE_CHAT_PROXY=1
+ORCHESTRATOR_SERVER_URL=http://127.0.0.1:8000
 ```
-
-The UI always talks to this HTTP server. It does **not** call Vertex directly.
 The bridge emits typed cost payloads for rendering (`response_type=clarification|result|error`), so clarification prompts are kept as plain text and not rendered as result tables.
 
 ### Invoking Vertex AI Agent Engine on every message
@@ -41,7 +46,15 @@ Open `http://127.0.0.1:3000`.
 
 ## Full Local Stack
 
-From repo root (Windows PowerShell):
+From repo root:
+
+- macOS/Linux:
+
+```bash
+bash scripts/start-all.sh
+```
+
+- Windows PowerShell:
 
 ```powershell
 .\scripts\start-all.ps1
@@ -68,6 +81,16 @@ Required env vars:
 - `AGENT_ENGINE_EVAL_GCS_DEST`
 
 Stop services:
+
+- macOS/Linux:
+
+```bash
+pkill -f 'uvicorn main:app'
+pkill -f 'next dev'
+docker compose down
+```
+
+- Windows PowerShell:
 
 ```powershell
 .\scripts\stop-all.ps1
