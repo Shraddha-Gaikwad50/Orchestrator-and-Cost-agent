@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import uuid
+from typing import Any
 
 from google.adk.agents.context import Context
 from google.adk.agents import LlmAgent
@@ -17,17 +18,19 @@ import vertexai.agent_engines as agent_engines
 
 logger = logging.getLogger(__name__)
 _SPECIALIST_SESSION_KEY = "cost_specialist_session_id"
+# Keep in sync with vertex_agents/cost_metrics_agent/cost_payload_contract.py
+_COST_PAYLOAD_PREFIX = "COST_PAYLOAD_JSON:\n"
 
 _ORCHESTRATOR_INSTRUCTION = """You are a routing orchestrator for GCP cost intelligence.
 - For any cost, billing, spend, service-cost, project-cost, region-cost, trend, or usage question: ALWAYS call query_cost_specialist first.
 - Questions about the billing source schema or columns (for example schema, column names, whether a column exists, or unique values in a column) are also cost-specialist questions.
 - Never invent numbers, services, trends, dates, or filters.
-- If user intent is ambiguous (missing time window, scope, grouping, or top-N), ask exactly one concise clarification question instead of guessing.
+- If the specialist return starts with COST_PAYLOAD_JSON: (typed clarification or error), your entire final message must be exactly that string with no paraphrase and no other text.
+- If user intent is ambiguous (missing time window, scope, grouping, or top-N) and the specialist has not already returned COST_PAYLOAD_JSON, ask exactly one concise clarification instead of guessing.
 - For non-cost greetings or generic platform guidance, answer directly and briefly.
-- If the specialist returns data, summarize faithfully with no extra claims.
-- If the specialist indicates clarification is needed, ask that exact clarification.
-- If the specialist returns an error or insufficient data, state uncertainty clearly and ask one targeted next-step question.
-- Never output internal tool traces or raw debugging events."""
+- If the specialist returns normal cost/result data (not COST_PAYLOAD_JSON), summarize faithfully with no extra claims.
+- Never output internal tool traces or raw debugging events.
+"""
 
 _QUERY_URL = os.environ.get("COST_AGENT_QUERY_ENDPOINT", "").strip()
 _RESOURCE_NAME = os.environ.get("COST_AGENT_ENGINE_RESOURCE", "").strip()
@@ -62,17 +65,32 @@ def _extract_text_from_part(p: dict) -> str:
         args = fc.get("args") if "args" in fc else fc.get("arguments")
         return f"[tool call: {name}] {json.dumps(args, ensure_ascii=False) if args is not None else ''}".strip()
 
-    fr = p.get("function_response")
-    if isinstance(fr, dict):
-        inner = fr.get("response")
-        if inner is not None:
-            if isinstance(inner, (dict, list)):
-                return json.dumps(inner, ensure_ascii=False)
-            return str(inner)
-        return json.dumps(fr, ensure_ascii=False)
-    if isinstance(fr, str):
-        return fr
+    for fr_key in ("function_response", "functionResponse", "tool_response", "ToolResponse"):
+        fr = p.get(fr_key)
+        if isinstance(fr, dict):
+            inner = fr.get("response")
+            if inner is not None:
+                if isinstance(inner, (dict, list)):
+                    return json.dumps(inner, ensure_ascii=False)
+                s = str(inner)
+                if s.strip().startswith("{") and "response_type" in s:
+                    return s
+                return s
+            return json.dumps(fr, ensure_ascii=False)
+        if isinstance(fr, str):
+            return fr
     return ""
+
+
+def _walk_collect_response_type(obj: Any, out: list[dict]) -> None:
+    if isinstance(obj, dict):
+        if isinstance(obj.get("response_type"), str) and obj.get("response_type").strip():
+            out.append(obj)
+        for v in obj.values():
+            _walk_collect_response_type(v, out)
+    elif isinstance(obj, list):
+        for v in obj:
+            _walk_collect_response_type(v, out)
 
 
 def _extract_text(event: dict) -> str:
@@ -92,23 +110,32 @@ def _extract_text(event: dict) -> str:
     return "\n".join(out).strip()
 
 
+def _harvest_typed_from_event(ev: dict) -> str:
+    """Prefer COST_PAYLOAD_JSON or raw function response JSON with response_type."""
+    typed: list[dict] = []
+    _walk_collect_response_type(ev, typed)
+    for obj in typed:
+        if not isinstance(obj, dict):
+            continue
+        rt = str(obj.get("response_type") or "").lower()
+        if rt in ("clarification", "error"):
+            return f"{_COST_PAYLOAD_PREFIX}{json.dumps(obj, ensure_ascii=False)}"
+    return ""
+
+
 def _normalize_specialist_output(text: str) -> str:
     """Convert structured specialist control payloads into plain routing directives."""
     cleaned = text.strip()
     if not cleaned:
         return cleaned
+    if cleaned.startswith("COST_PAYLOAD_JSON:") or _COST_PAYLOAD_PREFIX in cleaned:
+        return cleaned
     try:
         obj = json.loads(cleaned)
     except Exception:
         return cleaned
-    if isinstance(obj, dict) and obj.get("response_type") == "clarification":
-        q = str(obj.get("question") or "").strip()
-        options = obj.get("options")
-        if isinstance(options, list) and options:
-            opts = "\n".join(f"- {str(x).strip()}" for x in options if str(x).strip())
-            if opts:
-                return f"CLARIFICATION_REQUIRED:\n{q}\nOptions:\n{opts}".strip()
-        return f"CLARIFICATION_REQUIRED:\n{q}".strip()
+    if isinstance(obj, dict) and obj.get("response_type") in ("clarification", "error"):
+        return f"{_COST_PAYLOAD_PREFIX}{json.dumps(obj, ensure_ascii=False)}"
     if isinstance(obj, dict) and obj.get("needs_clarification"):
         q = str(obj.get("question") or "").strip()
         options = obj.get("options")
@@ -190,6 +217,9 @@ def query_cost_specialist(question: str, tool_context: ToolContext | None = None
             if isinstance(ev, dict) and ev.get("code"):
                 return f"Specialist error {ev.get('code')}: {ev.get('message')}"
             if isinstance(ev, dict):
+                first = _harvest_typed_from_event(ev)
+                if first:
+                    return _normalize_specialist_output(first)
                 t = _extract_text(ev)
                 if t:
                     chunks.append(t)

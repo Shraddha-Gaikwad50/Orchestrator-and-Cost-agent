@@ -23,6 +23,7 @@ from intelligence import sse_pack_a2a
 import session_repository
 
 logger = logging.getLogger(__name__)
+# Must match vertex_agents/cost_metrics_agent/cost_payload_contract.COST_PAYLOAD_PREFIX
 _COST_PAYLOAD_MARKER = "COST_PAYLOAD_JSON:\n"
 
 _ORCHESTRATOR_RESOURCE = os.environ.get(

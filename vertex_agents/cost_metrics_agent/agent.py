@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from typing import Any
 
 from google.adk.agents import LlmAgent
@@ -13,6 +12,7 @@ from google.adk.tools import FunctionTool, ToolContext
 from google.adk.tools.preload_memory_tool import PreloadMemoryTool
 
 from . import db_logic
+from .cost_payload_contract import COST_PAYLOAD_PREFIX
 
 logger = logging.getLogger(__name__)
 _PENDING_KEY = "pending_clarification"
@@ -27,14 +27,17 @@ def _normalize_spaces(text: str) -> str:
 
 
 def _extract_vs_pair(text: str) -> tuple[str, str] | None:
-    m = re.search(r"\b(.+?)\s+vs\.?\s+(.+)\b", text, re.I)
-    if not m:
-        return None
-    left = m.group(1).strip(" .,:;")
-    right = m.group(2).strip(" .,:;")
-    if not left or not right:
-        return None
-    return left, right
+    normalized = _normalize_spaces(text)
+    lower = normalized.lower()
+    for sep in (" vs. ", " vs "):
+        idx = lower.find(sep)
+        if idx < 0:
+            continue
+        left = normalized[:idx].strip(" .,:;")
+        right = normalized[idx + len(sep) :].strip(" .,:;")
+        if left and right:
+            return left, right
+    return None
 
 
 def _detect_compare_scope(text: str) -> str | None:
@@ -52,8 +55,10 @@ def _detect_compare_scope(text: str) -> str | None:
 
 def _extract_time_window(text: str) -> str | None:
     t = _normalize_spaces(text).lower()
-    if re.search(r"\blast\s+\d+\s+days?\b", t):
-        return re.search(r"\blast\s+\d+\s+days?\b", t).group(0)
+    words = t.split()
+    for i in range(len(words) - 2):
+        if words[i] == "last" and words[i + 1].isdigit() and words[i + 2] in {"day", "days"}:
+            return f"last {words[i + 1]} days"
     if "this month" in t or "month-to-date" in t:
         return "this month (month-to-date)"
     if "full history" in t or "all time" in t or "to date" in t or "till now" in t or "until now" in t:
@@ -225,7 +230,8 @@ def query_cloud_costs(question: str, tool_context: ToolContext | None = None) ->
         if new_pending is not None:
             if tool_context and isinstance(tool_context.state, dict):
                 tool_context.state[_PENDING_KEY] = new_pending
-            return _pending_clarification_payload(new_pending)
+            pld = _pending_clarification_payload(new_pending)
+            return f"{COST_PAYLOAD_PREFIX}{pld}"
         if rewritten:
             effective_question = rewritten
             if tool_context and isinstance(tool_context.state, dict):
@@ -233,6 +239,9 @@ def query_cloud_costs(question: str, tool_context: ToolContext | None = None) ->
 
     result = db_logic.query_costs(effective_question)
     structured = _as_structured_tool_response(result)
+    out_body = _to_json(structured)
+    if structured.get("response_type") in ("clarification", "error"):
+        out_body = f"{COST_PAYLOAD_PREFIX}{out_body}"
 
     if tool_context and isinstance(tool_context.state, dict):
         if structured.get("response_type") == "clarification":
@@ -250,7 +259,7 @@ def query_cloud_costs(question: str, tool_context: ToolContext | None = None) ->
             }
         else:
             tool_context.state.pop(_PENDING_KEY, None)
-    return _to_json(structured)
+    return out_body
 
 
 async def _persist_turn_memory(callback_context: Context) -> None:
@@ -273,13 +282,14 @@ root_agent = LlmAgent(
     model="gemini-2.5-flash",
     instruction=(
         "You are a cloud cost analyst. For cost answers, use query_cloud_costs as the source of truth. "
+        "MANDATORY: call query_cloud_costs for every user turn that mentions or implies spend, cost, compare, services, time periods, or rankings (including one-word or vague asks such as 'Compare spend.' with no time window or entities). "
+        "Do not answer from prior knowledge, templates, or generic cost advice before the tool has run. "
         "You may also answer schema questions about the configured billing BigQuery source, such as listing columns, checking whether a column exists, or listing distinct values for a valid column. "
         "Never invent values, services, currencies, date windows, rankings, or trends. "
         "Never confuse normalized output fields with the actual BigQuery view schema. "
-        "If query_cloud_costs returns response_type=clarification, ask exactly that clarification and stop. "
-        "If the request is ambiguous (missing time window, scope, grouping, compare entities, or top-N), ask one concise clarification question instead of guessing. "
-        "When tool data exists, summarize faithfully and mention the effective window/filters used. "
-        "If the tool returns response_type=error, state that you cannot verify from current data, include detail/hint, and ask one actionable follow-up. "
+        "STRICT: If the tool return starts with 'COST_PAYLOAD_JSON:' (clarification or error from query_cloud_costs), your entire final assistant message must be exactly that tool string — same characters, no paraphrase, no preamble, no extra lines. "
+        "For any other tool result (numeric/table JSON without that prefix), summarize faithfully and mention the effective window/filters. "
+        "If the request is ambiguous (missing time window, scope, grouping, compare entities, or top-N), ask one concise clarification after the tool provides it — but when the tool returns COST_PAYLOAD_JSON for clarification, output only that block. "
         "Never expose internal chain-of-thought or fabricate fallback results."
     ),
     tools=[PreloadMemoryTool(), FunctionTool(query_cloud_costs)],

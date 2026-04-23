@@ -1,62 +1,110 @@
 [
   {
+    "id": "clarify.top_services.no_top_n",
+    "category": "clarification",
+    "priority": "P0",
     "prompt": "What are the most expensive services?",
     "expected_mode": "clarify",
-    "must_contain_any": ["clarification", "time window", "top 3", "top 5", "top 10"]
+    "expected_response_type": "clarification",
+    "must_contain_any": ["top 3", "top 5", "top 10", "how many results", "most expensive"]
   },
   {
+    "id": "clarify.cloud_sql.no_window",
+    "category": "clarification",
+    "priority": "P0",
     "prompt": "What did we spend on Cloud SQL?",
     "expected_mode": "clarify",
-    "must_contain_any": ["time window", "last 7 days", "this month", "full history"]
+    "expected_response_type": "clarification",
+    "must_contain_any": ["time", "last 7 days", "this month", "full history"]
   },
   {
+    "id": "clarify.compare.no_scope",
+    "category": "clarification",
+    "priority": "P0",
     "prompt": "Compare spend.",
     "expected_mode": "clarify",
+    "expected_response_type": "clarification",
     "must_contain_any": ["compare", "prod vs dev", "project", "service"]
   },
   {
+    "id": "answer.compare.services.last_30_days",
+    "category": "comparison",
+    "priority": "P0",
     "prompt": "Compare spend for Cloud SQL vs Vertex AI in the last 30 days.",
     "expected_mode": "answer",
+    "expected_response_type": "result",
     "must_not_contain_any": ["CLARIFICATION_REQUIRED", "What two scopes should I compare?"]
   },
   {
+    "id": "answer.cloud_sql.last_7_days",
+    "category": "cost_answer",
+    "priority": "P0",
     "prompt": "What did we spend on Cloud SQL in the last 7 days?",
     "expected_mode": "answer",
+    "expected_response_type": "result",
     "must_not_contain_any": ["CLARIFICATION_REQUIRED", "What time window should I use"]
   },
   {
+    "id": "answer.cloud_sql.this_year.project",
+    "category": "time_interpretation",
+    "priority": "P0",
     "prompt": "What has been the total spend on Cloud SQL this year for jaybel-dev project?",
     "expected_mode": "answer",
+    "expected_response_type": "result",
     "must_not_contain_any": ["CLARIFICATION_REQUIRED", "What time window should I use"]
   },
   {
+    "id": "answer.top3.this_month",
+    "category": "ranking",
+    "priority": "P1",
     "prompt": "List the top 3 most expensive services this month.",
     "expected_mode": "answer",
+    "expected_response_type": "result",
     "must_not_contain_any": ["I am not sure", "guess", "probably"]
   },
   {
+    "id": "answer.unique_services.till_now",
+    "category": "discovery",
+    "priority": "P1",
     "prompt": "List all unique services used till now.",
     "expected_mode": "answer",
+    "expected_response_type": "result",
     "must_not_contain_any": ["I am not sure", "guess", "probably"]
   },
   {
+    "id": "answer.schema.columns",
+    "category": "schema",
+    "priority": "P1",
     "prompt": "What are all the column names in the billing view?",
     "expected_mode": "answer",
+    "expected_response_type": "result",
     "must_contain_any": ["column", "project_name", "service_name"]
   },
   {
+    "id": "answer.schema.column_exists",
+    "category": "schema",
+    "priority": "P1",
     "prompt": "Does project_name exist as a column?",
     "expected_mode": "answer",
+    "expected_response_type": "result",
     "must_contain_any": ["project_name", "exists"]
   },
   {
+    "id": "answer.schema.distinct_values",
+    "category": "schema",
+    "priority": "P1",
     "prompt": "List all unique values in the project_name column.",
     "expected_mode": "answer",
+    "expected_response_type": "result",
     "must_contain_any": ["project_name"]
   },
   {
+    "id": "error.schema.unknown_column",
+    "category": "schema",
+    "priority": "P1",
     "prompt": "List all unique values in the fake_column_xyz column.",
-    "expected_mode": "answer",
-    "must_contain_any": ["does not exist", "column"]
+    "expected_mode": "error",
+    "expected_response_type": "error",
+    "must_contain_any": ["does not exist", "column", "cannot verify"]
   }
 ]
