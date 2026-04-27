@@ -154,6 +154,8 @@ To ensure Agent Engine console tabs are populated with real data:
 - Evaluation publishing (Evaluation tab):
   - `scripts/agent-engine-create-eval.py`
   - Uses reusable eval prompts from `scripts/evals/agent_engine_eval_cases.json`.
+  - Cost-saving smoke baseline (5 critical P0 cases) is versioned in:
+    - `scripts/evals/eval_smoke_p0.json`
   - Supports multi-turn regression packs (for clarification chains) via `turns` arrays in case files, e.g. `scripts/evals/agent_engine_multiturn_cases.json`.
   - Golden dataset baseline is versioned in:
     - `scripts/evals/golden_dataset_v1.json`
@@ -163,7 +165,12 @@ To ensure Agent Engine console tabs are populated with real data:
     - `expected_mode` checks (`clarify|answer|error`)
     - optional typed checks via `expected_response_type`
     - `must_contain_any` and `must_not_contain_any` checks (text plus structured fields when `COST_PAYLOAD_JSON:` is present)
+  - Supports cheaper local subsets:
+    - `--priority P0` (repeatable)
+    - `--case-id <id>` (repeatable)
+    - `--max-cases N`
   - Optional `--turn-timeout-seconds` and `--turn-retries` to stabilize long single-turn runs against the orchestrator
+  - Publish mode defaults to full Vertex rubric metrics; use `--minimal-vertex-eval` to publish only `HALLUCINATION` when cost-sensitive.
   - Supports strict failure gates:
     - `--fail-on-assertion`
     - `--fail-on-priority P0`
@@ -175,6 +182,10 @@ To ensure Agent Engine console tabs are populated with real data:
   - macOS/Linux: `scripts/seed-agent-engine-observability.sh`
   - Windows: `scripts/seed-agent-engine-observability.ps1`
   - Runs memory seeding plus four eval suites (orchestrator/cost x single/multi turn) with release-style thresholds.
+  - Optional cost controls (opt-in only; defaults unchanged):
+    - `SKIP_MEMORY_SMOKE=1`
+    - `SKIP_VERTEX_PUBLISH=1`
+    - `MINIMAL_VERTEX_EVAL=1` (publishes only `HALLUCINATION`)
   - Required env vars:
     - `ORCHESTRATOR_AGENT_ENGINE_RESOURCE`
     - `COST_AGENT_ENGINE_RESOURCE`

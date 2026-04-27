@@ -1,0 +1,42 @@
+[
+  {
+    "id": "clarify.top_services.no_top_n",
+    "category": "clarification",
+    "priority": "P0",
+    "prompt": "What are the most expensive services?",
+    "expected_mode": "clarify",
+    "expected_response_type": "clarification"
+  },
+  {
+    "id": "clarify.cloud_sql.no_window",
+    "category": "clarification",
+    "priority": "P0",
+    "prompt": "What did we spend on Cloud SQL?",
+    "expected_mode": "clarify",
+    "expected_response_type": "clarification"
+  },
+  {
+    "id": "clarify.compare.no_scope",
+    "category": "clarification",
+    "priority": "P0",
+    "prompt": "Compare spend.",
+    "expected_mode": "clarify",
+    "expected_response_type": "clarification"
+  },
+  {
+    "id": "answer.compare.services.last_30_days",
+    "category": "comparison",
+    "priority": "P0",
+    "prompt": "Compare spend for Cloud SQL vs Vertex AI in the last 30 days.",
+    "expected_mode": "answer",
+    "expected_response_type": "result"
+  },
+  {
+    "id": "answer.cloud_sql.last_7_days",
+    "category": "cost_answer",
+    "priority": "P0",
+    "prompt": "What did we spend on Cloud SQL in the last 7 days?",
+    "expected_mode": "answer",
+    "expected_response_type": "result"
+  }
+]

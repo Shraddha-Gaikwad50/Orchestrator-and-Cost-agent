@@ -76,8 +76,12 @@ Evaluation + Memories tabs
 - Evaluation tab population:
   - Publish real eval runs through Vertex GenAI eval client:
     - scripts/agent-engine-create-eval.py --publish-to-vertex --gcs-dest gs://<bucket>/<path>
+  - Cost-aware options for repeat runs:
+    - `--max-cases N`, `--priority P0`, `--case-id <id>` to reduce run size.
+    - `--minimal-vertex-eval` to publish a cheaper run with only `HALLUCINATION`.
   - Use `scripts/evals/agent_engine_eval_cases.json` for single-turn guardrails and
     `scripts/evals/agent_engine_multiturn_cases.json` for clarification-flow regressions.
+  - Cheap committed smoke pack (5 P0 cases): `scripts/evals/eval_smoke_p0.json`
   - Clarification and error paths use the typed `COST_PAYLOAD_JSON:` line prefix; the
     eval harness matches `must_contain_any` / `must_not` against both final text and
     parsed JSON fields. Optional: `--turn-timeout-seconds` and `--turn-retries` for
@@ -106,6 +110,10 @@ Evaluation + Memories tabs
 - One-command helper for both tabs (memory seeding + four eval runs: single-turn + multi-turn for each agent):
   - scripts/seed-agent-engine-observability.sh (macOS/Linux)
   - scripts/seed-agent-engine-observability.ps1 (Windows)
+  - Optional cost controls (opt-in only; default behavior unchanged):
+    - `SKIP_MEMORY_SMOKE=1`
+    - `SKIP_VERTEX_PUBLISH=1`
+    - `MINIMAL_VERTEX_EVAL=1`
   - Prereqs:
     - ORCHESTRATOR_AGENT_ENGINE_RESOURCE
     - COST_AGENT_ENGINE_RESOURCE

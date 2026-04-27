@@ -37,6 +37,25 @@ def load_cases(cases_path: str | None) -> list[dict]:
     return data
 
 
+def filter_cases(
+    cases: list[dict],
+    *,
+    priorities: list[str] | None = None,
+    case_ids: list[str] | None = None,
+    max_cases: int | None = None,
+) -> list[dict]:
+    out = list(cases)
+    if priorities:
+        wanted = {p.strip().upper() for p in priorities if p.strip()}
+        out = [c for c in out if str(c.get("priority") or "").strip().upper() in wanted]
+    if case_ids:
+        wanted_ids = {x.strip() for x in case_ids if x.strip()}
+        out = [c for c in out if str(c.get("id") or "").strip() in wanted_ids]
+    if max_cases is not None:
+        out = out[: max(0, int(max_cases))]
+    return out
+
+
 def _as_str_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
@@ -413,6 +432,10 @@ def default_metrics() -> list:
     ]
 
 
+def minimal_metrics() -> list:
+    return [_safe_metric("HALLUCINATION")]
+
+
 def build_eval_dataset(cases: list[dict]) -> pd.DataFrame:
     prompts: list[str] = []
     session_inputs: list = []
@@ -479,6 +502,28 @@ def main() -> None:
         default=0,
         help="On empty final text for a turn, retry the turn up to this many extra times (same session).",
     )
+    parser.add_argument(
+        "--max-cases",
+        type=int,
+        help="Run only the first N cases after filtering.",
+    )
+    parser.add_argument(
+        "--priority",
+        action="append",
+        default=[],
+        help="Include only cases with this priority (repeatable: P0, P1, P2).",
+    )
+    parser.add_argument(
+        "--case-id",
+        action="append",
+        default=[],
+        help="Include only specific case id(s) (repeatable).",
+    )
+    parser.add_argument(
+        "--minimal-vertex-eval",
+        action="store_true",
+        help="When publishing to Vertex, evaluate only HALLUCINATION metric (cheaper).",
+    )
     args = parser.parse_args()
 
     if not args.project:
@@ -491,10 +536,23 @@ def main() -> None:
         raise SystemExit("--turn-retries must be non-negative")
     if args.turn_timeout_seconds < 0:
         raise SystemExit("--turn-timeout-seconds must be non-negative")
+    if args.max_cases is not None and args.max_cases < 0:
+        raise SystemExit("--max-cases must be non-negative")
+    if args.priority:
+        bad = [p for p in args.priority if p.strip().upper() not in {"P0", "P1", "P2"}]
+        if bad:
+            raise SystemExit(f"--priority values must be P0|P1|P2 (invalid: {', '.join(bad)})")
 
     cases = load_cases(args.cases)
+    cases = filter_cases(
+        cases,
+        priorities=args.priority,
+        case_ids=args.case_id,
+        max_cases=args.max_cases,
+    )
     validate_cases(cases)
     labels = parse_labels(args.label)
+    print(f"Loaded {len(cases)} eval case(s) from {args.cases}")
 
     vertexai.init(project=args.project, location=args.location)
     engine = agent_engines.get(args.resource)
@@ -593,7 +651,7 @@ def main() -> None:
         eval_run = eval_client.evals.create_evaluation_run(
             dataset=inferred_dataset,
             agent=args.resource,
-            metrics=default_metrics(),
+            metrics=minimal_metrics() if args.minimal_vertex_eval else default_metrics(),
             dest=args.gcs_dest,
             display_name=args.display_name,
             labels=labels if labels else None,
