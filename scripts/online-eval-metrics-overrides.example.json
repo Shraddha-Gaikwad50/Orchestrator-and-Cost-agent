@@ -1,0 +1,18 @@
+{
+  "REPLACE_WITH_TRACE_ID_HEX32": {
+    "metrics": {
+      "SAFETY": 1,
+      "HALLUCINATION": 1,
+      "FINAL_RESPONSE_QUALITY": 100,
+      "TOOL_USE_QUALITY": 100
+    },
+    "metrics_vertex_names": {
+      "safety_v1": 1,
+      "hallucination_v1": 1,
+      "final_response_quality_v1": 100,
+      "tool_use_quality_v1": 100
+    },
+    "provenance": "agent_platform_console_evaluation_tab",
+    "metrics_note": "Paste values from Console → Agent → Traces → trace → Evaluation. Cloud Trace list/get does not expose rubric keys on spans for most Agent Engine exports."
+  }
+}

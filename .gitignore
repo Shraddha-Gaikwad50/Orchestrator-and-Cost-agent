@@ -2,6 +2,7 @@ logs/*.log
 logs/*.err.log
 .venv/
 config/gcp.env
+config/*.local.json
 vertex_agents/**/.env
 # Local Next.js env (use frontend/.env.example); may contain credential paths
 frontend/.env

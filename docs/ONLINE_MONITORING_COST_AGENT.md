@@ -330,7 +330,19 @@ bash scripts/sync-online-monitor-to-firestore.sh \
 
 Optional: `--trace-ids 'id1,id2'` fetches those trace IDs with `GET` and upserts Firestore (then exits). Add `--update-cursor-after-backfill` if you want to move the incremental cursor after a backfill.
 
-**Known limitation:** Agent Platform may show “4 metrics” in the Traces table while the **Cloud Trace v1 `list`/`get` payloads** for the same `traceId` often **do not** include separate span labels for rubric scores—the documents you store will still have `trace_id`, timestamps, agent metadata, and `matched_trace_label_keys`, but `metrics` may be `{}` until label names are documented or surfaced on spans.
+**Why `metrics` can be `{}`:** The **Agent Platform / Console Evaluation** tab loads scores from an internal path. **`cloudtrace.googleapis.com` v1 trace JSON** for the same `traceId` typically has **no** `HALLUCINATION` / `SAFETY` / etc. span labels, and **Cloud Monitoring’s** `aiplatform.googleapis.com/online_evaluator/scores` series is **aggregated** (no `trace_id` label), so this repo cannot infer per-trace numbers from those APIs alone.
+
+**Fill `metrics` in Firestore:** export from Console (Evaluation tab) and use a **JSON overrides** file + patch:
+
+```bash
+# Build a file like scripts/online-eval-metrics-overrides.example.json (one key per trace_id)
+
+bash scripts/sync-online-monitor-to-firestore.sh \
+  --metrics-overrides "path/to/overrides.json" \
+  --apply-metrics-overrides-only
+```
+
+During a normal sync, pass **`--metrics-overrides`** to merge the same file whenever each trace is written.
 
 ---
 

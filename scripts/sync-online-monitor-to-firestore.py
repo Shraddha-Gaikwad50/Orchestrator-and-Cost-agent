@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 """Copy online-monitor evaluation scores from Cloud Trace into Firestore.
 
-Online monitors attach rubric scores to trace spans (see Agent Platform docs).
-This script lists traces matching your monitor, parses known metric labels from
-all spans, and upserts one Firestore document per trace_id.
+Online monitors attach rubric scores to trace spans in the **Agent Platform UI**, but
+Cloud Trace HTTP `get`/`list` responses often **do not** include rubric keys on span
+labels. Scores are also aggregated in Cloud Monitoring (`online_evaluator/scores`)
+without a per-trace label there. For reliable `metrics` in Firestore, use
+**`--metrics-overrides`** (JSON from Console Evaluation tab) or **`--apply-metrics-overrides-only`**.
+
+This script lists traces, parses any metric-like labels it finds on spans, and upserts
+one Firestore document per trace_id.
 
 Prerequisites:
   - ADC with cloud-platform (e.g. gcloud auth application-default login)
@@ -20,6 +25,7 @@ import os
 import re
 import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 import google.auth
@@ -124,7 +130,57 @@ def _parse_args() -> argparse.Namespace:
         default="",
         help="Comma-separated Cloud Trace IDs to fetch directly (GET), write Firestore, then exit (no list crawl). Useful for pinpoint backfill.",
     )
+    p.add_argument(
+        "--metrics-overrides",
+        default=os.environ.get("ONLINE_EVAL_METRICS_OVERRIDES_PATH", "").strip(),
+        metavar="PATH",
+        help="JSON file: trace_id -> { \"metrics\": {...}, \"provenance\": str, \"metrics_vertex_names\": {...} }. Merged into each document (Trace-exported metrics stay empty without this).",
+    )
+    p.add_argument(
+        "--apply-metrics-overrides-only",
+        action="store_true",
+        help="Only merge --metrics-overrides into existing Firestore docs by trace_id (no Cloud Trace calls).",
+    )
     return p.parse_args()
+
+
+_RESERVED_METRICS_OVERRIDE_KEYS = frozenset(
+    {"metrics", "provenance", "metrics_vertex_names", "metric_rationales", "metrics_note"}
+)
+
+
+def _load_metrics_overrides(path: str) -> dict[str, Any]:
+    p = path.strip()
+    if not p:
+        return {}
+    raw = json.loads(Path(p).read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise SystemExit("--metrics-overrides file must be a JSON object mapping trace_id -> overrides")
+    return raw
+
+
+def _merge_metrics_overrides_into_doc(trace_id: str, doc: dict[str, Any], overrides: dict[str, Any]) -> None:
+    raw = overrides.get(trace_id)
+    if not raw or not isinstance(raw, dict):
+        return
+    existing = doc.get("metrics")
+    base: dict[str, Any] = dict(existing) if isinstance(existing, dict) else {}
+    if "metrics" in raw and isinstance(raw["metrics"], dict):
+        doc["metrics"] = {**base, **raw["metrics"]}
+    else:
+        from_flat = {k: v for k, v in raw.items() if k not in _RESERVED_METRICS_OVERRIDE_KEYS}
+        if from_flat:
+            doc["metrics"] = {**base, **from_flat}
+        elif base:
+            doc["metrics"] = base
+    if raw.get("provenance"):
+        doc["metrics_provenance"] = str(raw["provenance"])
+    if isinstance(raw.get("metrics_vertex_names"), dict):
+        doc["metrics_vertex_names"] = raw["metrics_vertex_names"]
+    if raw.get("metrics_note"):
+        doc["metrics_note"] = str(raw["metrics_note"])
+    if isinstance(raw.get("metric_rationales"), dict):
+        doc["metric_rationales"] = raw["metric_rationales"]
 
 
 def _parse_rfc3339_utc(s: str) -> datetime:
@@ -390,6 +446,30 @@ def main() -> None:
         _dump_trace_labels(sess, project_id=project, trace_id=args.dump_labels_trace_id.strip())
         return
 
+    overrides = _load_metrics_overrides(args.metrics_overrides) if args.metrics_overrides.strip() else {}
+
+    if args.apply_metrics_overrides_only:
+        if not overrides:
+            raise SystemExit("--apply-metrics-overrides-only requires --metrics-overrides PATH with a JSON object.")
+        db = _firestore_client(project, args.firestore_database)
+        n = 0
+        for trace_id in overrides:
+            doc: dict[str, Any] = {
+                "trace_id": trace_id,
+                "project_id": project,
+            }
+            _merge_metrics_overrides_into_doc(trace_id, doc, overrides)
+            if not args.dry_run:
+                doc["metrics_last_patched_at"] = firestore.SERVER_TIMESTAMP
+            doc = {k: v for k, v in doc.items() if v is not None}
+            if args.dry_run:
+                print(json.dumps(doc, ensure_ascii=False, default=str))
+            else:
+                db.collection(args.collection).document(trace_id).set(doc, merge=True)
+                n += 1
+        print(f"Patched metrics on {n} document(s) in {args.collection!r}.", file=sys.stderr)
+        return
+
     ev = args.online_evaluator.strip()
     trace_filter: str | None
     trace_ids_direct = [x.strip() for x in str(args.trace_ids or "").split(",") if x.strip()]
@@ -483,9 +563,10 @@ def main() -> None:
             }
             if db is not None:
                 doc["ingested_at"] = firestore.SERVER_TIMESTAMP
+            _merge_metrics_overrides_into_doc(trace_id, doc, overrides)
             doc = {k: v for k, v in doc.items() if v is not None}
             if args.dry_run:
-                print(json.dumps({"trace_id": trace_id, "metrics": extracted["metrics"]}, ensure_ascii=False))
+                print(json.dumps({"trace_id": trace_id, "metrics": doc.get("metrics")}, ensure_ascii=False))
             else:
                 assert db is not None
                 db.collection(args.collection).document(trace_id).set(doc, merge=True)
@@ -548,10 +629,11 @@ def main() -> None:
             }
             if db is not None:
                 doc["ingested_at"] = firestore.SERVER_TIMESTAMP
+            _merge_metrics_overrides_into_doc(trace_id, doc, overrides)
             doc = {k: v for k, v in doc.items() if v is not None}
 
             if args.dry_run:
-                print(json.dumps({"trace_id": trace_id, "metrics": extracted["metrics"]}, ensure_ascii=False))
+                print(json.dumps({"trace_id": trace_id, "metrics": doc.get("metrics")}, ensure_ascii=False))
             else:
                 assert db is not None
                 db.collection(args.collection).document(trace_id).set(doc, merge=True)
