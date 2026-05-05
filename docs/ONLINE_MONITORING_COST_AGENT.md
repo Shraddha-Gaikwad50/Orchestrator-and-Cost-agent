@@ -315,6 +315,23 @@ bash scripts/sync-online-monitor-to-firestore.sh --max-traces 50
 
 Schedule with Cloud Scheduler → Cloud Run Job or cron; keep overlap so late-arriving traces are re-listed idempotently.
 
+**Time-range backfill (April 30-style)** — ignores the Firestore cursor for that run:
+
+```bash
+bash scripts/sync-online-monitor-to-firestore.sh \
+  --online-evaluator 'projects/PROJECT/locations/REGION/onlineEvaluators/MONITOR_ID' \
+  --start-time '2026-04-30T00:00:00Z' \
+  --end-time '2026-05-01T00:00:00Z' \
+  --scan-without-list-filter \
+  --scan-gen-ai-agent-name cost_metrics_agent \
+  --scan-max-list-traces 5000 \
+  --max-traces 200
+```
+
+Optional: `--trace-ids 'id1,id2'` fetches those trace IDs with `GET` and upserts Firestore (then exits). Add `--update-cursor-after-backfill` if you want to move the incremental cursor after a backfill.
+
+**Known limitation:** Agent Platform may show “4 metrics” in the Traces table while the **Cloud Trace v1 `list`/`get` payloads** for the same `traceId` often **do not** include separate span labels for rubric scores—the documents you store will still have `trace_id`, timestamps, agent metadata, and `matched_trace_label_keys`, but `metrics` may be `{}` until label names are documented or surfaced on spans.
+
 ---
 
 ## 11) Optional next steps

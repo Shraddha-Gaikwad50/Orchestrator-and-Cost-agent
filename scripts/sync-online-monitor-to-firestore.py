@@ -95,7 +95,46 @@ def _parse_args() -> argparse.Namespace:
         default=500,
         help="With --scan-without-list-filter, stop after examining this many traces (pagination).",
     )
+    p.add_argument(
+        "--start-time",
+        default="",
+        help="RFC3339 UTC window start (inclusive), e.g. 2026-04-30T00:00:00Z. Requires --end-time; ignores Firestore cursor.",
+    )
+    p.add_argument(
+        "--end-time",
+        default="",
+        help="RFC3339 UTC window end (inclusive), e.g. 2026-05-01T00:00:00Z. Requires --start-time.",
+    )
+    p.add_argument(
+        "--update-cursor-after-backfill",
+        action="store_true",
+        help="When using --start-time/--end-time, still write the sync cursor (default: skip, for one-shot backfills).",
+    )
+    p.add_argument(
+        "--scan-gen-ai-agent-name",
+        default=os.environ.get("ONLINE_EVAL_SCAN_GEN_AI_AGENT_NAME", "").strip(),
+        help=(
+            "With --scan-without-list-filter, also keep traces whose spans include "
+            "label gen_ai.agent.name equal to this value (e.g. cost_metrics_agent). "
+            "Use when online_evaluator labels are absent from exported spans but Agent Platform Traces UI still shows monitored runs."
+        ),
+    )
+    p.add_argument(
+        "--trace-ids",
+        default="",
+        help="Comma-separated Cloud Trace IDs to fetch directly (GET), write Firestore, then exit (no list crawl). Useful for pinpoint backfill.",
+    )
     return p.parse_args()
+
+
+def _parse_rfc3339_utc(s: str) -> datetime:
+    raw = s.strip()
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    dt = datetime.fromisoformat(raw)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 
 def _auth_session() -> AuthorizedSession:
@@ -190,6 +229,33 @@ def _online_evaluator_needles(full_resource: str) -> tuple[str, ...]:
         out.append(f"/onlineEvaluators/{m.group(1)}")
         out.append(m.group(1))
     return tuple(dict.fromkeys(out))  # dedupe preserve order
+
+
+def _trace_has_gen_ai_agent_name(trace: dict[str, Any], agent_name: str) -> bool:
+    want = agent_name.strip()
+    if not want:
+        return False
+    for sp in trace.get("spans") or []:
+        labels = sp.get("labels") or {}
+        if not isinstance(labels, dict):
+            continue
+        v = labels.get("gen_ai.agent.name")
+        if isinstance(v, str) and v.strip() == want:
+            return True
+    return False
+
+
+def _trace_matches_scan_postfilter(
+    trace: dict[str, Any],
+    evaluator_resource: str,
+    *,
+    gen_ai_agent_name: str | None,
+) -> bool:
+    if evaluator_resource.strip() and _trace_matches_online_evaluator(trace, evaluator_resource):
+        return True
+    if gen_ai_agent_name and _trace_has_gen_ai_agent_name(trace, gen_ai_agent_name):
+        return True
+    return False
 
 
 def _trace_matches_online_evaluator(trace: dict[str, Any], evaluator_resource: str) -> bool:
@@ -326,9 +392,14 @@ def main() -> None:
 
     ev = args.online_evaluator.strip()
     trace_filter: str | None
+    trace_ids_direct = [x.strip() for x in str(args.trace_ids or "").split(",") if x.strip()]
+
     if args.scan_without_list_filter:
-        if not ev:
-            raise SystemExit("--scan-without-list-filter requires --online-evaluator (or ONLINE_EVALUATOR_RESOURCE).")
+        if not ev and not args.scan_gen_ai_agent_name.strip():
+            raise SystemExit(
+                "--scan-without-list-filter requires --online-evaluator and/or --scan-gen-ai-agent-name "
+                "(set metrics metadata and/or span match)."
+            )
         trace_filter = None
         if args.trace_filter:
             raise SystemExit("Use either --scan-without-list-filter or --trace-filter, not both.")
@@ -342,10 +413,15 @@ def main() -> None:
                 )
             trace_filter = _default_trace_filter(ev)
 
-    end_time = datetime.now(timezone.utc)
+    st_raw = args.start_time.strip()
+    et_raw = args.end_time.strip()
+    explicit_range = bool(st_raw and et_raw)
+    if bool(st_raw) != bool(et_raw):
+        raise SystemExit("Provide both --start-time and --end-time, or neither.")
+
     db: firestore.Client | None = None if args.dry_run else _firestore_client(project, args.firestore_database)
     try:
-        cursor = _read_cursor(db)
+        cursor = _read_cursor(db) if not explicit_range else None
     except gcp_exceptions.NotFound as exc:
         raise SystemExit(
             "Firestore has no database in this project (or wrong FIRESTORE_DATABASE_ID). "
@@ -354,10 +430,20 @@ def main() -> None:
             "--type=firestore-native --project=YOUR_PROJECT_ID\n"
             f"Underlying error: {exc}"
         ) from exc
-    if cursor is not None:
-        start_time = cursor - timedelta(minutes=max(args.overlap_minutes, 0))
+
+    end_time = datetime.now(timezone.utc)
+    start_time: datetime
+    if explicit_range:
+        start_time = _parse_rfc3339_utc(st_raw)
+        end_time = _parse_rfc3339_utc(et_raw)
+        if start_time >= end_time:
+            raise SystemExit("--start-time must be before --end-time.")
     else:
-        start_time = end_time - timedelta(minutes=max(args.lookback_minutes, 1))
+        end_time = datetime.now(timezone.utc)
+        if cursor is not None:
+            start_time = cursor - timedelta(minutes=max(args.overlap_minutes, 0))
+        else:
+            start_time = end_time - timedelta(minutes=max(args.lookback_minutes, 1))
 
     metric_names = _metric_names_from_env()
 
@@ -367,8 +453,48 @@ def main() -> None:
     print(f"Querying Cloud Trace project={project}", file=sys.stderr)
     print(f"  window: {start_time.isoformat()} .. {end_time.isoformat()}", file=sys.stderr)
     print(f"  filter: {trace_filter!s}", file=sys.stderr)
+    if explicit_range:
+        print("  mode: explicit time range (Firestore cursor ignored for window)", file=sys.stderr)
     if args.scan_without_list_filter:
         print("  mode: scan-without-list-filter (post-filter by evaluator resource)", file=sys.stderr)
+    if args.scan_gen_ai_agent_name.strip():
+        print(f"  scan also match gen_ai.agent.name={args.scan_gen_ai_agent_name.strip()!r}", file=sys.stderr)
+
+    # Direct trace id ingest (no list).
+    if trace_ids_direct:
+        for trace_id in trace_ids_direct:
+            if total_written >= args.max_traces:
+                break
+            tr = _get_trace(sess, project_id=project, trace_id=trace_id)
+            trace_id = str(tr.get("traceId") or trace_id).strip()
+            extracted = _extract_evaluation_fields(tr, metric_names)
+            doc = {
+                "trace_id": trace_id,
+                "project_id": project,
+                "online_evaluator_resource": args.online_evaluator.strip() or extracted.get("online_evaluator_from_trace"),
+                "agent_resource": args.agent_resource.strip() or None,
+                "metrics": extracted["metrics"],
+                "metric_rationales": extracted["rationales"] or None,
+                "matched_trace_label_keys": extracted["matched_label_keys"],
+                "root_span_start_time": extracted["root_span_start_time"],
+                "root_span_end_time": extracted["root_span_end_time"],
+                "source": "cloud_trace_online_monitor",
+                "ingest_path": "trace_ids",
+            }
+            if db is not None:
+                doc["ingested_at"] = firestore.SERVER_TIMESTAMP
+            doc = {k: v for k, v in doc.items() if v is not None}
+            if args.dry_run:
+                print(json.dumps({"trace_id": trace_id, "metrics": extracted["metrics"]}, ensure_ascii=False))
+            else:
+                assert db is not None
+                db.collection(args.collection).document(trace_id).set(doc, merge=True)
+                total_written += 1
+        should_cursor = db is not None and not args.dry_run and (not explicit_range or args.update_cursor_after_backfill)
+        if should_cursor:
+            _write_cursor(db, datetime.now(timezone.utc) if explicit_range else end_time)
+        print(f"Done. Upserted {total_written} trace document(s) into {args.collection!r}.", file=sys.stderr)
+        return
 
     while total_written < args.max_traces:
         data = _list_traces(
@@ -392,7 +518,11 @@ def main() -> None:
                 examined += 1
                 if examined > args.scan_max_list_traces:
                     break
-                if not _trace_matches_online_evaluator(tr, ev):
+                if not _trace_matches_scan_postfilter(
+                    tr,
+                    ev,
+                    gen_ai_agent_name=args.scan_gen_ai_agent_name.strip() or None,
+                ):
                     continue
             trace_id = str(tr.get("traceId") or "").strip()
             if not trace_id:
@@ -433,7 +563,9 @@ def main() -> None:
         if not page_token:
             break
 
-    _write_cursor(db, end_time)
+    should_cursor = db is not None and not args.dry_run and (not explicit_range or args.update_cursor_after_backfill)
+    if should_cursor:
+        _write_cursor(db, datetime.now(timezone.utc) if explicit_range else end_time)
 
     print(f"Done. Upserted {total_written} trace document(s) into {args.collection!r}.", file=sys.stderr)
 
