@@ -315,6 +315,34 @@ bash scripts/sync-online-monitor-to-firestore.sh --max-traces 50
 
 Schedule with Cloud Scheduler → Cloud Run Job or cron; keep overlap so late-arriving traces are re-listed idempotently.
 
+**Automate every 24h (recommended):**
+
+```bash
+source .venv/bin/activate
+set -a && source config/gcp.env && set +a
+
+# Required before deploy:
+# export ONLINE_EVALUATOR_RESOURCE='projects/PROJECT/locations/REGION/onlineEvaluators/NUMERIC_ID'
+
+bash scripts/deploy-online-monitor-firestore-sync-job.sh
+```
+
+This creates/updates:
+
+- Cloud Run Job `online-eval-firestore-sync` (or `ONLINE_EVAL_SYNC_JOB_NAME`)
+- Cloud Scheduler HTTP job `online-eval-firestore-sync-daily` (or `ONLINE_EVAL_SYNC_SCHEDULER_JOB_NAME`)
+- Runtime and invoker service accounts with minimum IAM for Trace read + Firestore write + job invoke
+
+The deploy script performs one immediate execution (`gcloud run jobs execute ... --wait`) so you can verify before waiting 24h.
+
+**Default schedule:** `0 0 * * *` in `Etc/UTC` (exactly every 24h). Override with:
+
+- `ONLINE_EVAL_SYNC_SCHEDULE`
+- `ONLINE_EVAL_SYNC_TIME_ZONE`
+- `ONLINE_EVAL_SYNC_RUN_REGION`
+
+**Important for broad automatic capture:** do **not** pass `--trace-ids`, `--trace-ids-file`, or `--evaluated-trace-allowlist-file` in automation. The job uses incremental list crawl + cursor and writes to `cost_agent_online_eval_traces`.
+
 **Time-range backfill (April 30-style)** — ignores the Firestore cursor for that run:
 
 ```bash

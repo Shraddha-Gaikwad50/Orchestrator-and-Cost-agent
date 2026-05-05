@@ -1,0 +1,11 @@
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - infra/cloudrun/sync-online-monitor-firestore/Dockerfile
+      - -t
+      - ${_IMAGE}
+      - .
+images:
+  - ${_IMAGE}
