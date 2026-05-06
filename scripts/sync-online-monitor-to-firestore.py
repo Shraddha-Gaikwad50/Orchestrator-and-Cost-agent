@@ -646,8 +646,11 @@ def main() -> None:
         print("  mode: explicit time range (Firestore cursor ignored for window)", file=sys.stderr)
     if args.scan_without_list_filter:
         print("  mode: scan-without-list-filter (post-filter by evaluator resource)", file=sys.stderr)
-    if args.scan_gen_ai_agent_name.strip():
-        print(f"  scan also match gen_ai.agent.name={args.scan_gen_ai_agent_name.strip()!r}", file=sys.stderr)
+        if args.scan_gen_ai_agent_name.strip():
+            print(
+                f"  scan also match gen_ai.agent.name={args.scan_gen_ai_agent_name.strip()!r}",
+                file=sys.stderr,
+            )
 
     # Direct trace id ingest (no list).
     if trace_ids_direct:

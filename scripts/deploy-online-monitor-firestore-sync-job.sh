@@ -23,10 +23,13 @@ TIME_ZONE="${ONLINE_EVAL_SYNC_TIME_ZONE:-Etc/UTC}"
 COLLECTION="${ONLINE_EVAL_FIRESTORE_COLLECTION:-cost_agent_online_eval_traces}"
 ONLINE_EVALUATOR_RESOURCE="${ONLINE_EVALUATOR_RESOURCE:-}"
 SCAN_AGENT_NAME="${ONLINE_EVAL_SCAN_GEN_AI_AGENT_NAME:-cost_metrics_agent}"
+SCAN_MAX_LIST_TRACES="${ONLINE_EVAL_SYNC_SCAN_MAX_LIST_TRACES:-3000}"
 MAX_TRACES="${ONLINE_EVAL_SYNC_MAX_TRACES:-200}"
 PAGE_SIZE="${ONLINE_EVAL_SYNC_PAGE_SIZE:-50}"
 LOOKBACK_MINUTES="${ONLINE_EVAL_SYNC_LOOKBACK_MINUTES:-180}"
 OVERLAP_MINUTES="${ONLINE_EVAL_SYNC_OVERLAP_MINUTES:-45}"
+TASK_TIMEOUT="${ONLINE_EVAL_SYNC_TASK_TIMEOUT:-1800s}"
+SKIP_CLOUD_BUILD="${ONLINE_EVAL_SYNC_SKIP_CLOUD_BUILD:-0}"
 
 if [[ -z "$ONLINE_EVALUATOR_RESOURCE" ]]; then
   echo "Set ONLINE_EVALUATOR_RESOURCE in config/gcp.env or env."
@@ -65,23 +68,27 @@ gcloud projects add-iam-policy-binding "$PROJECT" --member="serviceAccount:${RUN
 gcloud projects add-iam-policy-binding "$PROJECT" --member="serviceAccount:${RUNTIME_SA}" --role="roles/datastore.user" >/dev/null
 gcloud projects add-iam-policy-binding "$PROJECT" --member="serviceAccount:${RUNTIME_SA}" --role="roles/logging.logWriter" >/dev/null
 
-echo "Building image with Cloud Build..."
-gcloud builds submit \
-  --project "$PROJECT" \
-  --config "infra/cloudrun/sync-online-monitor-firestore/cloudbuild.yaml" \
-  --substitutions "_IMAGE=${IMAGE}" \
-  .
+if [[ "${SKIP_CLOUD_BUILD}" == "1" ]]; then
+  echo "Skipping Cloud Build (ONLINE_EVAL_SYNC_SKIP_CLOUD_BUILD=1); reusing image ${IMAGE}."
+else
+  echo "Building image with Cloud Build..."
+  gcloud builds submit \
+    --project "$PROJECT" \
+    --config "infra/cloudrun/sync-online-monitor-firestore/cloudbuild.yaml" \
+    --substitutions "_IMAGE=${IMAGE}" \
+    .
+fi
 
-echo "Deploying Cloud Run Job ${JOB_NAME}..."
+echo "Deploying Cloud Run Job ${JOB_NAME} (scan mode: no Trace list filter; post-filter by evaluator + ${SCAN_AGENT_NAME})..."
 gcloud run jobs deploy "$JOB_NAME" \
   --project "$PROJECT" \
   --region "$REGION" \
   --image "$IMAGE" \
   --service-account "$RUNTIME_SA" \
-  --task-timeout=900s \
+  --task-timeout="${TASK_TIMEOUT}" \
   --max-retries=1 \
   --set-env-vars "GOOGLE_CLOUD_PROJECT=${PROJECT},ONLINE_EVALUATOR_RESOURCE=${ONLINE_EVALUATOR_RESOURCE},ONLINE_EVAL_FIRESTORE_COLLECTION=${COLLECTION},ONLINE_EVAL_SCAN_GEN_AI_AGENT_NAME=${SCAN_AGENT_NAME}" \
-  --args=--project="${PROJECT}",--online-evaluator="${ONLINE_EVALUATOR_RESOURCE}",--collection="${COLLECTION}",--max-traces="${MAX_TRACES}",--page-size="${PAGE_SIZE}",--lookback-minutes="${LOOKBACK_MINUTES}",--overlap-minutes="${OVERLAP_MINUTES}"
+  --args=--project="${PROJECT}",--online-evaluator="${ONLINE_EVALUATOR_RESOURCE}",--collection="${COLLECTION}",--scan-without-list-filter,--scan-gen-ai-agent-name="${SCAN_AGENT_NAME}",--scan-max-list-traces="${SCAN_MAX_LIST_TRACES}",--max-traces="${MAX_TRACES}",--page-size="${PAGE_SIZE}",--lookback-minutes="${LOOKBACK_MINUTES}",--overlap-minutes="${OVERLAP_MINUTES}",--include-non-evaluated-agent-traces
 
 echo "Granting Scheduler invoker role on the job..."
 gcloud run jobs add-iam-policy-binding "$JOB_NAME" --project "$PROJECT" --region "$REGION" --member="serviceAccount:${SCHEDULER_INVOKER_SA}" --role="roles/run.invoker" >/dev/null

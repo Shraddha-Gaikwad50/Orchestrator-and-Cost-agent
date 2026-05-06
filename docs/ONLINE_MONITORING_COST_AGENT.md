@@ -335,6 +335,8 @@ This creates/updates:
 
 The deploy script performs one immediate execution (`gcloud run jobs execute ... --wait`) so you can verify before waiting 24h.
 
+**Cloud Run Job mode (default after deploy):** the job runs Cloud Trace **list without a server-side `+online_evaluator` filter** (`--scan-without-list-filter`), then keeps traces that match your online evaluator on span labels **and/or** carry `gen_ai.agent.name=cost_metrics_agent`. It also passes **`--include-non-evaluated-agent-traces`** so those post-filtered runs are **upserted even when** exported spans lack rubric keys (common for this workload); you still cap volume with `ONLINE_EVAL_SYNC_MAX_TRACES` (default 200 written per run). This matches cases where the Console shows monitored traces but `--trace-filter` listing returns zero rows. Cap on Trace list examination: `ONLINE_EVAL_SYNC_SCAN_MAX_LIST_TRACES` (default 3000).
+
 **Default schedule:** `0 0 * * *` in `Etc/UTC` (exactly every 24h). Override with:
 
 - `ONLINE_EVAL_SYNC_SCHEDULE`
@@ -342,6 +344,8 @@ The deploy script performs one immediate execution (`gcloud run jobs execute ...
 - `ONLINE_EVAL_SYNC_RUN_REGION`
 
 **Important for broad automatic capture:** do **not** pass `--trace-ids`, `--trace-ids-file`, or `--evaluated-trace-allowlist-file` in automation. The job uses incremental list crawl + cursor and writes to `cost_agent_online_eval_traces`.
+
+**Rebuild tip:** faster redeploy after changing job args only: `ONLINE_EVAL_SYNC_SKIP_CLOUD_BUILD=1 bash scripts/deploy-online-monitor-firestore-sync-job.sh` (reuses the last pushed image tag).
 
 **Time-range backfill (April 30-style)** — ignores the Firestore cursor for that run:
 

@@ -27,10 +27,13 @@ $SchedulerSa = if ($env:ONLINE_EVAL_SYNC_SCHEDULER_INVOKER_SA) { $env:ONLINE_EVA
 $ScanAgentName = if ($env:ONLINE_EVAL_SCAN_GEN_AI_AGENT_NAME) { $env:ONLINE_EVAL_SCAN_GEN_AI_AGENT_NAME } else { "cost_metrics_agent" }
 $ArRepo = if ($env:ONLINE_EVAL_SYNC_AR_REPO) { $env:ONLINE_EVAL_SYNC_AR_REPO } else { "cloud-run-jobs" }
 $Image = "us-central1-docker.pkg.dev/$Project/$ArRepo/$JobName`:latest"
+$ScanMaxListTraces = if ($env:ONLINE_EVAL_SYNC_SCAN_MAX_LIST_TRACES) { $env:ONLINE_EVAL_SYNC_SCAN_MAX_LIST_TRACES } else { "3000" }
 $MaxTraces = if ($env:ONLINE_EVAL_SYNC_MAX_TRACES) { $env:ONLINE_EVAL_SYNC_MAX_TRACES } else { "200" }
 $PageSize = if ($env:ONLINE_EVAL_SYNC_PAGE_SIZE) { $env:ONLINE_EVAL_SYNC_PAGE_SIZE } else { "50" }
 $Lookback = if ($env:ONLINE_EVAL_SYNC_LOOKBACK_MINUTES) { $env:ONLINE_EVAL_SYNC_LOOKBACK_MINUTES } else { "180" }
 $Overlap = if ($env:ONLINE_EVAL_SYNC_OVERLAP_MINUTES) { $env:ONLINE_EVAL_SYNC_OVERLAP_MINUTES } else { "45" }
+$TaskTimeout = if ($env:ONLINE_EVAL_SYNC_TASK_TIMEOUT) { $env:ONLINE_EVAL_SYNC_TASK_TIMEOUT } else { "1800s" }
+$SkipCloudBuild = ($env:ONLINE_EVAL_SYNC_SKIP_CLOUD_BUILD -eq "1")
 
 gcloud services enable run.googleapis.com cloudscheduler.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com cloudtrace.googleapis.com firestore.googleapis.com --project $Project
 
@@ -49,22 +52,29 @@ gcloud projects add-iam-policy-binding $Project --member "serviceAccount:$Runtim
 gcloud projects add-iam-policy-binding $Project --member "serviceAccount:$RuntimeSa" --role roles/datastore.user *> $null
 gcloud projects add-iam-policy-binding $Project --member "serviceAccount:$RuntimeSa" --role roles/logging.logWriter *> $null
 
-Push-Location $RepoRoot
-try {
+if (-not $SkipCloudBuild) {
+  Push-Location $RepoRoot
+  try {
     gcloud builds submit --project $Project --config infra/cloudrun/sync-online-monitor-firestore/cloudbuild.yaml --substitutions "_IMAGE=$Image" .
-} finally {
+  } finally {
     Pop-Location
+  }
 }
+else {
+  Write-Host "Skipping Cloud Build (ONLINE_EVAL_SYNC_SKIP_CLOUD_BUILD=1); reusing image $Image."
+}
+
+Write-Host "Deploying job (scan mode: post-filter evaluator + $ScanAgentName)."
 
 gcloud run jobs deploy $JobName `
   --project $Project `
   --region $Region `
   --image $Image `
   --service-account $RuntimeSa `
-  --task-timeout 900s `
+  --task-timeout $TaskTimeout `
   --max-retries 1 `
   --set-env-vars "GOOGLE_CLOUD_PROJECT=$Project,ONLINE_EVALUATOR_RESOURCE=$env:ONLINE_EVALUATOR_RESOURCE,ONLINE_EVAL_FIRESTORE_COLLECTION=$Collection,ONLINE_EVAL_SCAN_GEN_AI_AGENT_NAME=$ScanAgentName" `
-  --args="--project=$Project,--online-evaluator=$env:ONLINE_EVALUATOR_RESOURCE,--collection=$Collection,--max-traces=$MaxTraces,--page-size=$PageSize,--lookback-minutes=$Lookback,--overlap-minutes=$Overlap"
+  --args="--project=$Project,--online-evaluator=$env:ONLINE_EVALUATOR_RESOURCE,--collection=$Collection,--scan-without-list-filter,--scan-gen-ai-agent-name=$ScanAgentName,--scan-max-list-traces=$ScanMaxListTraces,--max-traces=$MaxTraces,--page-size=$PageSize,--lookback-minutes=$Lookback,--overlap-minutes=$Overlap,--include-non-evaluated-agent-traces"
 
 gcloud run jobs add-iam-policy-binding $JobName --project $Project --region $Region --member "serviceAccount:$SchedulerSa" --role roles/run.invoker *> $null
 
